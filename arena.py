@@ -4,7 +4,8 @@
 from agent import Agent, DNA_SIZE
 import torch
 from random import sample
-from tictactoe import TicTacToe
+#from tictactoe import TicTacToe as Game
+from dummy_game import DummyGame as Game
 
 
 
@@ -27,7 +28,7 @@ total_moves = []
 while True:
   player1_hash, player2_hash = sample(list(agents.keys()), 2)
   player1, player2 = agents[player1_hash], agents[player2_hash]
-  game = TicTacToe()
+  game = Game()
   while not game.isover:
     if game.last_player == 1 or game.last_player == 0:
       action = player1.act(game.board)
@@ -47,7 +48,7 @@ while True:
     pass#print(f" Nobody wins after {game.total_moves} moves")
   game_cnt += 1
   total_moves.append(game.total_moves)
-  if game_cnt % 1000 == 0:
+  if game_cnt % 10000 == 0:
     print(f"Average moves per game: {sum(total_moves) / len(total_moves)}")
     total_moves = []
 
@@ -57,6 +58,7 @@ while True:
       agents.pop(agent.hash)
     if agent.credits >= 10:
       new_dna = agent.give_birth()
+      #new_dna = torch.randn(DNA_SIZE)
       new_agent = Agent(new_dna)
       agents[new_agent.hash] = new_agent
 

@@ -4,12 +4,13 @@ import torch
 import numpy as np
 import torch.nn as nn
 
-DNA_SIZE = 200
-NOISE_SIZE = 100
+DNA_SIZE = 20
+NOISE_SIZE = 10
 BOARD_SIZE = 9
 ACTION_SIZE = 6
 INIT_CREDS = 5
-WEIGHT_SIZE = 61906
+WEIGHT_SIZE = 886
+EMBED_N = 10
 
 dna_unroll_model = nn.Linear(DNA_SIZE, WEIGHT_SIZE)
 
@@ -18,12 +19,10 @@ class Agent():
   def __init__(self, dna):
     self.dna = dna
     self.hash = random.getrandbits(128)
-    self.action_model = nn.Sequential(nn.Linear(BOARD_SIZE + NOISE_SIZE, 100),
+    self.action_model = nn.Sequential(nn.Linear(BOARD_SIZE + NOISE_SIZE, EMBED_N),
                                       nn.ReLU(),
-                                      nn.Linear(100, ACTION_SIZE))
-    self.birth_model = nn.Sequential(nn.Linear(DNA_SIZE + NOISE_SIZE, 100),
-                                     nn.ReLU(),
-                                     nn.Linear(100, DNA_SIZE))
+                                      nn.Linear(EMBED_N, ACTION_SIZE))
+    self.birth_model = nn.Sequential(nn.Linear(DNA_SIZE + NOISE_SIZE, DNA_SIZE))
     self.credits = INIT_CREDS
 
     weights_idx = 0
