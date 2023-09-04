@@ -1,14 +1,11 @@
-
-
-
-
-
+import numpy as np
 
 class TicTacToe():
   def __init__(self):
-    self.board = [[0,0,0],[0,0,0],[0,0,0]]
+    self.board = np.array([[0,0,0],[0,0,0],[0,0,0]])
     self.winner = 0
-    self.gameover = False
+    self.last_player = 0
+    self.credits = 5
 
   def check_winner(self):
     for i in range(3):
@@ -20,7 +17,10 @@ class TicTacToe():
       self.winner = self.board[0][0]
   
   def move(self, x, y, player):
+    #print(f"Player {player} moves to ({x}, {y}), self.last_player = {self.last_player}")
     assert player == 1 or player == -1
+    assert self.last_player != player
+    self.last_player = player
     if self.board[x][y] == 0:
       self.board[x][y] = player
       self.check_winner()
@@ -43,3 +43,7 @@ class TicTacToe():
   @property
   def isover(self):
     return self.winner != 0 or self.board_full()
+  
+  @property
+  def total_moves(self):
+    return np.sum(np.abs(self.board))
