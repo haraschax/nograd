@@ -5,7 +5,6 @@ class TicTacToe():
     self.board = np.array([[0,0,0],[0,0,0],[0,0,0]])
     self.winner = 0
     self.last_player = 0
-    self.credits = 5
 
   def check_winner(self):
     for i in range(3):
@@ -21,7 +20,7 @@ class TicTacToe():
     assert player == 1 or player == -1
     assert self.last_player != player
     self.last_player = player
-    if self.board[x][y] == 0:
+    if np.isfinite(x) and np.isfinite(y) and self.board[x][y] == 0:
       self.board[x][y] = player
       self.check_winner()
     else:
