@@ -1,7 +1,7 @@
 
 
 
-from agent import Agent, DNA_SIZE
+from agent import Agent, DNA_SIZE, INIT_CREDS
 import torch
 from random import sample
 from tictactoe import TicTacToe as Game
@@ -16,8 +16,7 @@ AGENTS_N = 100
 
 agents = {}
 for i in range(AGENTS_N):
-  random_dna = torch.randn(DNA_SIZE)
-  agent = Agent(random_dna)
+  agent = Agent()
   agents[agent.hash] = agent
 
 
@@ -50,14 +49,14 @@ while True:
   game_cnt += 1
   total_moves.append(game.total_moves)
   if game_cnt % 10000 == 0:
-    print(f"Average moves per game: {sum(total_moves) / len(total_moves)} total agents: {len(agents)} total games: {game_cnt} total births: {births}")
+    print(f"Average moves per game: {sum(total_moves) / len(total_moves)}, full games: {sum(torch.tensor(total_moves) == 9) / len(total_moves):.2f}, total agents: {len(agents)} total games: {game_cnt} total births: {births}")
     total_moves = []
 
 
   for agent in list(agents.values()):
     if agent.credits <= 0:
       agents.pop(agent.hash)
-    if agent.credits >= 10:
+    if agent.credits >= INIT_CREDS * 2:
       new_dna = agent.give_birth()
       births += 1
       #new_dna = torch.randn(DNA_SIZE)
