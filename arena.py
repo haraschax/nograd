@@ -3,6 +3,7 @@
 
 from agent import Agent, DNA_SIZE, INIT_CREDS
 import torch
+torch.set_grad_enabled(False)
 from random import sample
 from tictactoe import TicTacToe as Game
 #from dummy_game import DummyGame as Game
@@ -20,6 +21,7 @@ class Arena():
     self.total_moves = []
     self.births = 0
     self.last_mute = 0
+    self.last_mute2 = 0
     self.agents = agents
 
   def one_round(self):
@@ -59,7 +61,7 @@ class Arena():
         self.agents[new_agent.hash] = new_agent
 
         if agent.births >= 20:
-          births += 1
+          self.births += 1
           new_dna = agent.give_birth()
           new_agent = Agent(new_dna)
           self.agents[new_agent.hash] = new_agent

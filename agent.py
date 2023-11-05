@@ -1,6 +1,7 @@
 
 import random
 import torch
+torch.set_grad_enabled(False)
 import numpy as np
 import torch.nn as nn
 
@@ -9,7 +10,7 @@ NOISE_SIZE = 10
 STATE_SIZE = 1
 BOARD_SIZE = 18
 ACTION_SIZE = 9
-INIT_CREDS = 1
+INIT_CREDS = 5
 EMBED_N = 128
 META_SIZE = 2
 ACTION_WEIGHTS_SIZE = (BOARD_SIZE + NOISE_SIZE) * EMBED_N + EMBED_N * (ACTION_SIZE + STATE_SIZE) + EMBED_N + ACTION_SIZE + STATE_SIZE
@@ -33,10 +34,10 @@ class Agent():
     self.hash = random.getrandbits(128)
     self.action_model = nn.Sequential(nn.Linear(BOARD_SIZE + NOISE_SIZE, EMBED_N),
                                       nn.ReLU(),
-                                      nn.Linear(EMBED_N, ACTION_SIZE + STATE_SIZE))
+                                      nn.Linear(EMBED_N, ACTION_SIZE + STATE_SIZE)).to(device='cuda')
     self.birth_model = nn.Sequential(nn.Linear(NOISE_SIZE, EMBED_N),
                                       nn.ReLU(),
-                                      nn.Linear(EMBED_N, META_SIZE))
+                                      nn.Linear(EMBED_N, META_SIZE)).to(device='cuda')
 
     self.credits = INIT_CREDS
     self.state = torch.zeros(STATE_SIZE)
@@ -71,7 +72,7 @@ class Agent():
     else:
       x = np.argmax(action.detach().numpy()) // 3
       y = np.argmax(action.detach().numpy()) % 3
-      if torch.rand(1) < 0.1:
+      if torch.rand(1) < 0.0:
         x = np.random.randint(3)
         y = np.random.randint(3)
       return x,y
@@ -84,8 +85,8 @@ class Agent():
     #new_dna = torch.cat([birth_weights *10 ** (0.1 * torch.randn(birth_weights.shape)), action_weights])
     #mutation_rate = 10**self.dna[-1]
     #print(mutation_rate)
-    self.mutation_rate = 1e-4 #1.2**mutate_meta[0]
-    self.mutation_size = 10 #1.2**mutate_meta[1]
+    self.mutation_rate = 1e-3 #1.2**mutate_meta[0]
+    self.mutation_size = 1 #1.2**mutate_meta[1]
     mutation = self.mutation_size * (torch.rand(self.dna.shape) < self.mutation_rate)
     new_dna = self.dna + mutation * torch.randn(self.dna.shape)
     self.births += 1
