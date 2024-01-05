@@ -22,18 +22,18 @@ class Games():
   def update(self, moves, player):
     assert len(moves) == BATCH_SIZE
     assert len(moves) == self.boards.shape[0]
-    for idx, move in enumerate(moves):
-      if self.game_over[idx]:
-        continue
-      move_idx = torch.argmax(move)
-      if self.boards[idx, move_idx] != PLAYERS.NONE:
-        if player == PLAYERS.X:
-          self.winners[idx] = PLAYERS.O
-        else:
-          self.winners[idx] = PLAYERS.X
-      else:
-        self.boards[idx, move_idx] = player
-    #self.check_winners()
+    move_idxs = torch.argmax(moves, dim=1, keepdim=True)
+  
+    illegal_movers = self.boards.gather(1, move_idxs) != PLAYERS.NONE
+    self.winners[illegal_movers[:,0]] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
+
+    move_scattered = torch.zeros_like(self.boards.to(dtype=torch.bool))
+    move_scattered.scatter_(1, move_idxs, 1)
+
+    self.boards = self.boards + move_scattered * player
+ 
+
+   
     self.update_game_over()
   
   def check_winners(self):
@@ -71,7 +71,7 @@ class Players():
     return moves
   
   def mate(self):
-    mutation_rate = 1e-2
+    mutation_rate = 1e-3
     new_action_matrix = self.action_matrix + torch.randn(self.action_matrix.shape) * (torch.rand(self.action_matrix.shape) < mutation_rate)
     dead = (self.credits == 0).nonzero(as_tuple=True)[0]
     can_mate = (self.credits > 5).nonzero(as_tuple=True)[0]
