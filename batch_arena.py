@@ -5,12 +5,13 @@ import torch
 import time
 
 MAX_MOVES = 10
-BATCH_SIZE = 40000
-BOARD_SIZE = 9
+BATCH_SIZE = 20000
+BOARD_ROWS, BOARD_COLS = 3, 3
+BOARD_SIZE = BOARD_ROWS * BOARD_COLS
 INIT_CREDS = 5
 EMBED_N = 128
 NOISE_SIZE = 9
-
+import pickle
 
 DEVICE = 'cuda'
 
@@ -21,13 +22,14 @@ class PLAYERS:
 
 
 class Games():
-  def __init__(self):
-    self.boards = torch.zeros((BATCH_SIZE, BOARD_SIZE), dtype=torch.int8, device=DEVICE)
-    self.winners = torch.zeros((BATCH_SIZE,), dtype=torch.int8, device=DEVICE)
+  def __init__(self, bs=BATCH_SIZE):
+    self.bs = bs
+    self.boards = torch.zeros((self.bs, BOARD_SIZE), dtype=torch.int8, device=DEVICE)
+    self.winners = torch.zeros((self.bs,), dtype=torch.int8, device=DEVICE)
     self.update_game_over()
 
   def update(self, moves, player):
-    assert len(moves) == BATCH_SIZE
+    assert len(moves) == self.bs
     assert len(moves) == self.boards.shape[0]
     #move_idxs = torch.multinomial(moves, num_samples=1)
     move_idxs = torch.argmax(moves, dim=1, keepdim=True)
@@ -80,15 +82,22 @@ class Players():
     self.params = params
 
   def play(self, boards):
-    inputs = torch.cat([boards.float(), torch.rand_like(boards.float())], dim=1)
+    boards_onehot = torch.zeros((boards.shape[0], BOARD_SIZE, 3), dtype=torch.float32, device=DEVICE)
+    boards_onehot[:,:,0] = boards == PLAYERS.NONE
+    boards_onehot[:,:,1] = boards == PLAYERS.X
+    boards_onehot[:,:,2] = boards == PLAYERS.O
+    inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), torch.rand_like(boards.float())], dim=1)
     embed = torch.einsum('bji, bj->bi', self.params['input'], inputs)
     embed = embed + self.params['bias']
     embed = torch.relu(embed)
     moves = torch.einsum('bji, bj->bi', self.params['output'], embed)
+    moves = torch.softmax(moves, dim=1)
+    random_moves = torch.rand(moves.shape[:1], device=DEVICE) < 1e-1
+    moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
     return moves
   
   def mate(self):
-    mutation_rate = 1e-3
+    mutation_rate = 1e-4
     dead = (self.credits == 0).nonzero(as_tuple=True)[0]
     can_mate = (self.credits > INIT_CREDS).nonzero(as_tuple=True)[0]
     assert len(can_mate) >= len(dead)
@@ -96,7 +105,8 @@ class Players():
     self.credits[can_mate[:len(dead)]] -= INIT_CREDS
     for key in self.params:
       param = torch.clone(self.params[key])
-      new_param = param + torch.randn_like(param) * (torch.rand_like(param) < mutation_rate)
+      mutation = (torch.rand_like(param) < mutation_rate).float()
+      new_param = (1 - mutation) * param + mutation * (torch.randn_like(param))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
 
 
@@ -128,31 +138,37 @@ def concat_params(params1, params2):
     new_params[key] = torch.cat([params1[key], params2[key]])
   return new_params
 
+def __main__():
+  credits = INIT_CREDS * torch.ones((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE)
 
-credits = INIT_CREDS * torch.ones((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE)
-good_weights = 0*torch.randn((BATCH_SIZE*2, BOARD_SIZE + NOISE_SIZE, BOARD_SIZE), dtype=torch.float32, device=DEVICE)
-#for i in range(9):
-#  good_weights[:,i,i] = -1
-good_weights += 1.0*torch.randn_like(good_weights)
-good_weights = torch.randn((BATCH_SIZE*2, BOARD_SIZE*2, EMBED_N), dtype=torch.float32, device=DEVICE)
-
-params = {'input': good_weights,
-          'bias': torch.randn((BATCH_SIZE*2, EMBED_N), dtype=torch.float32, device=DEVICE),
-          'output': torch.randn((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float32, device=DEVICE)}
-players = Players(credits, params)
-while True:
-  t0 = time.time()
-  games = Games()
-  indices = torch.randperm(BATCH_SIZE*2)
-  x_players = Players(players.credits[indices][:BATCH_SIZE], splice_params(players.params, indices[:BATCH_SIZE]))
-  o_players = Players(players.credits[indices][BATCH_SIZE:], splice_params(players.params, indices[BATCH_SIZE:]))
-  t1 = time.time()
-  finish_games(games, x_players, o_players)
-  t2 = time.time()
-  players = Players(torch.cat([x_players.credits, o_players.credits]), concat_params(x_players.params, o_players.params))
-  players.mate()
-  t3 = time.time()
-  #assert False
-  print(t1-t0, t2-t1, t3-t2)
-  print(games.total_moves, x_players.credits.float().mean(), o_players.credits.float().mean())
- 
+  params = {'input': torch.randn((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float32, device=DEVICE),
+            'bias': torch.randn((BATCH_SIZE*2, EMBED_N), dtype=torch.float32, device=DEVICE),
+            'output': torch.randn((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float32, device=DEVICE)}
+  players = Players(credits, params)
+  cnt = 0
+  t_start = time.time()
+  while True:
+    t0 = time.time()
+    games = Games()
+    indices = torch.randperm(BATCH_SIZE*2)
+    x_players = Players(players.credits[indices][:BATCH_SIZE], splice_params(players.params, indices[:BATCH_SIZE]))
+    o_players = Players(players.credits[indices][BATCH_SIZE:], splice_params(players.params, indices[BATCH_SIZE:]))
+    t1 = time.time()
+    finish_games(games, x_players, o_players)
+    t2 = time.time()
+    players = Players(torch.cat([x_players.credits, o_players.credits]), concat_params(x_players.params, o_players.params))
+    players.mate()
+    t3 = time.time()
+    #assert False
+    if cnt % 100 == 0:
+      print(t1-t0, t2-t1, t3-t2)
+      print(games.total_moves, x_players.credits.float().mean(), o_players.credits.float().mean())
+    cnt += 1
+    if cnt % 1000 == 0:
+      pickle.dump(players.params, open('player_params.pkl', 'wb'))
+    #if games.total_moves > 7.5:
+    #  print(f' {cnt} games took {t3-t_start:.2f} seconds to achieve 7.5')
+    #  break
+  
+if __name__ == '__main__':
+  __main__()
