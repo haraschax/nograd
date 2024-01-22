@@ -23,8 +23,15 @@ class TicTacToeDataset(Dataset):
     
     def __getitem__(self, idx):
         board, move = self.data[idx]
-        board = board.flatten().astype(np.float32)
-        board = np.concatenate([board == -1, board == 1, torch.randn((10,))])
+        board = board.flatten()
+        boards_onehot = np.zeros((9, 3))
+        boards_onehot[:,0] = (board == 0)
+        boards_onehot[:,1] = (board == -1)
+        boards_onehot[:,2] = (board == 1)
+
+        board = boards_onehot.flatten().astype(np.float32)
+        
+        board = np.concatenate([board, torch.randn((9,))])
         board = torch.tensor(board, dtype=torch.float32)  # Convert board to tensor and flatten
         move = move[0] * 3 + move[1]  # Convert move to single integer
         return board, move
@@ -46,9 +53,9 @@ data_loader = DataLoader(dataset, batch_size=32, shuffle=True)
 class TicTacToeNN(nn.Module):
     def __init__(self):
         super(TicTacToeNN, self).__init__()
-        self.fc1 = nn.Linear(18 + 10, 128)
+        self.fc1 = nn.Linear(9*4, 128)
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(128, 10)
+        self.fc2 = nn.Linear(128, 9, bias=False)
         
     def forward(self, x):
         x = self.fc1(x)
@@ -60,10 +67,6 @@ class TicTacToeNN(nn.Module):
 model = TicTacToeNN()
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-# Assume data_loader is a DataLoader providing batches of (board, optimal_move) pairs.
-# For simplicity and illustration, let's say `data_loader` is equal to `data` here,
-# though in practice you'd use the DataLoader to handle batching, shuffling, etc.
 
 epochs = 1000
 for epoch in range(epochs):
@@ -86,6 +89,7 @@ for epoch in range(epochs):
     print(f'Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(data_loader)}')
 good_weights = []
 for param in model.parameters():
-    good_weights.append(param.data.flatten())
+    good_weights.append(param.data)
+    print(good_weights[-1].shape)
 with open('good_weights.pkl', 'wb') as f:
-  pickle.dump(torch.cat(good_weights), f)
+  pickle.dump(good_weights, f)

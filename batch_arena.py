@@ -81,7 +81,7 @@ class Players():
     self.credits = credits
     self.params = params
 
-  def play(self, boards):
+  def play(self, boards, test=False):
     boards_onehot = torch.zeros((boards.shape[0], BOARD_SIZE, 3), dtype=torch.float32, device=DEVICE)
     boards_onehot[:,:,0] = boards == PLAYERS.NONE
     boards_onehot[:,:,1] = boards == PLAYERS.X
@@ -92,8 +92,9 @@ class Players():
     embed = torch.relu(embed)
     moves = torch.einsum('bji, bj->bi', self.params['output'], embed)
     moves = torch.softmax(moves, dim=1)
-    random_moves = torch.rand(moves.shape[:1], device=DEVICE) < 1e-1
-    moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
+    if not test:
+      random_moves = torch.rand(moves.shape[:1], device=DEVICE) < 1e-1
+      moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
     return moves
   
   def mate(self):
@@ -110,20 +111,21 @@ class Players():
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
 
 
-def finish_games(games, x_players, o_players):
+def finish_games(games, x_players, o_players, test=False):
   while True:
     moves = x_players.play(games.boards)
-    games.update(moves, PLAYERS.X)
+    games.update(moves, PLAYERS.X, test=test)
     if torch.all(games.game_over):
       break
-    moves = o_players.play(games.boards)
+    moves = o_players.play(games.boards, test=test)
     games.update(moves, PLAYERS.O)
     if torch.all(games.game_over):
       break
-  x_players.credits[games.winners == PLAYERS.X] += 1
-  x_players.credits[games.losers == PLAYERS.X] -= 1
-  o_players.credits[games.winners == PLAYERS.O] += 1
-  o_players.credits[games.losers == PLAYERS.O] -= 1
+  if not test:
+    x_players.credits[games.winners == PLAYERS.X] += 1
+    x_players.credits[games.losers == PLAYERS.X] -= 1
+    o_players.credits[games.winners == PLAYERS.O] += 1
+    o_players.credits[games.losers == PLAYERS.O] -= 1
 
 
 def splice_params(params, indices):
@@ -138,12 +140,32 @@ def concat_params(params1, params2):
     new_params[key] = torch.cat([params1[key], params2[key]])
   return new_params
 
+
+
+from tensorboardX import SummaryWriter
+
 def __main__():
+  writer = SummaryWriter()
+
   credits = INIT_CREDS * torch.ones((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE)
 
   params = {'input': torch.randn((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float32, device=DEVICE),
             'bias': torch.randn((BATCH_SIZE*2, EMBED_N), dtype=torch.float32, device=DEVICE),
             'output': torch.randn((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float32, device=DEVICE)}
+  
+  import pickle
+  
+  golden_params = {'input': torch.randn((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float32, device=DEVICE),
+                   'bias': torch.randn((BATCH_SIZE*2, EMBED_N), dtype=torch.float32, device=DEVICE),
+                   'output': torch.randn((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float32, device=DEVICE)}
+  good_weights = pickle.load(open('good_weights.pkl', 'rb'))
+  golden_params['input'][:] = good_weights[0].T
+  golden_params['bias'][:] = good_weights[1]
+  golden_params['output'][:] = good_weights[2].T
+
+  golden_players = Players(torch.zeros((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE), golden_params)
+
+
   players = Players(credits, params)
   cnt = 0
   t_start = time.time()
@@ -161,11 +183,16 @@ def __main__():
     t3 = time.time()
     #assert False
     if cnt % 100 == 0:
-      print(t1-t0, t2-t1, t3-t2)
-      print(games.total_moves, x_players.credits.float().mean(), o_players.credits.float().mean())
+      #print(t1-t0, t2-t1, t3-t2)
+      print(f'Average total moves: {games.total_moves:.2f}, avg credits of X: {x_players.credits.float().mean():.2f}, avg credits of O: {o_players.credits.float().mean():.2f}')
+      #print(games.total_moves, x_players.credits.float().mean(), o_players.credits.float().mean())
     cnt += 1
     if cnt % 1000 == 0:
       pickle.dump(players.params, open('player_params.pkl', 'wb'))
+      games = Games(bs=BATCH_SIZE*2)
+      finish_games(games, golden_players, players, test=True)
+      print(f'Vs perfect player avg total moves: {games.total_moves:.2f}, X win rate: {(games.winners == PLAYERS.X).float().mean():.2f}')
+      
     #if games.total_moves > 7.5:
     #  print(f' {cnt} games took {t3-t_start:.2f} seconds to achieve 7.5')
     #  break
