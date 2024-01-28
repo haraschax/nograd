@@ -98,14 +98,14 @@ class Players():
     moves = torch.softmax(moves, dim=1)
     return moves
   
-  def mate(self, mutation_rate=1e-4):
+  def mate(self, init_credits=INIT_CREDS):
     assert self.credits is not None, "Credits must be set before mating."
     mutation_rate = torch.exp(self.params['mutuation'].sum(dim=1))
     dead = (self.credits == 0).nonzero(as_tuple=True)[0]
-    can_mate = (self.credits > INIT_CREDS).nonzero(as_tuple=True)[0]
+    can_mate = (self.credits > init_credits).nonzero(as_tuple=True)[0]
     assert len(can_mate) >= len(dead)
-    self.credits[dead] = INIT_CREDS
-    self.credits[can_mate[:len(dead)]] -= INIT_CREDS
+    self.credits[dead] = init_credits
+    self.credits[can_mate[:len(dead)]] -= init_credits
     for key in self.params:
       if key in ['block']:
         mutation_rate_full = mutation_rate.reshape((-1, 1, 1,1)).repeat((1, self.params[key].shape[1], self.params[key].shape[2], self.params[key].shape[3]))
@@ -155,10 +155,10 @@ def concat_params(params1, params2):
 
 from tensorboardX import SummaryWriter
 
-def train_run(name='', mutation_rate=1e-4):
+def train_run(name='', credits=INIT_CREDS):
   writer = SummaryWriter(f'runs/{name}')
 
-  credits = INIT_CREDS * torch.ones((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE)
+  credits = credits * torch.ones((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE)
 
   params = {'input': torch.randn((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float32, device=DEVICE),
             'bias': torch.randn((BATCH_SIZE*2, EMBED_N), dtype=torch.float32, device=DEVICE),
@@ -177,7 +177,7 @@ def train_run(name='', mutation_rate=1e-4):
 
   players = Players(params, credits)
   t_start = time.time()
-  for step in range(1000000):
+  for step in range(100000):
     t0 = time.time()
     games = Games()
     indices = torch.randperm(BATCH_SIZE*2)
@@ -187,7 +187,7 @@ def train_run(name='', mutation_rate=1e-4):
     finish_games(games, x_players, o_players)
     t2 = time.time()
     players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]))
-    players.mate(mutation_rate=mutation_rate)
+    players.mate()
     t3 = time.time()
     if step % 100 == 0:
       print(f'{step} games took {t3-t_start:.2f} seconds')
@@ -209,7 +209,7 @@ def train_run(name='', mutation_rate=1e-4):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(5,7):
+  for i in range(1,7):
     mutation_rate = 10**(-i)
     name = f'run2_{i}'
-    train_run(name=name, mutation_rate=mutation_rate)
+    train_run(name=name, credits=i)
