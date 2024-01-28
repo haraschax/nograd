@@ -134,12 +134,10 @@ def play_games(games, x_players, o_players, test=False):
     if torch.all(games.game_over):
       break
     current_player = next_player(current_player)
-  
   if not test:
     for player in player_dict:
       player_dict[player].credits[games.winners == player] += 1
       player_dict[player].credits[games.losers == player] -= 1
-
 
 def splice_params(params, indices):
   new_params = {}
@@ -176,7 +174,6 @@ def train_run(name='', credits=INIT_CREDS):
     players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]))
     players.mate()
     if step % 100 == 0:
-      print(f'{step} games took {t3-t_start:.2f} seconds')
       print(f'Average total moves: {games.total_moves:.2f}, avg credits of X: {x_players.credits.float().mean():.2f}, avg credits of O: {o_players.credits.float().mean():.2f}')
       writer.add_scalar('total_moves', games.total_moves, step)
       writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
