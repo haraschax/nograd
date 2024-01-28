@@ -55,7 +55,7 @@ if __name__ == '__main__':
   games = Games(bs=1)
 
   BATCH_SIZE = 1
-  good_weights = pickle.load(open('perfect_player_weights.pkl', 'rb'))
+  good_weights = pickle.load(open('perfect_dna.pkl', 'rb'))
   golden_params = {}
   golden_params['input'] = torch.cat([good_weights[0].T[None,:,:].to(device=DEVICE)  for _ in range(BATCH_SIZE)], dim=0)
   golden_params['bias'] = torch.cat([good_weights[1][None,:].to(device=DEVICE) for _ in range(BATCH_SIZE)], dim=0)

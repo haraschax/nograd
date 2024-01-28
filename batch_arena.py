@@ -166,7 +166,7 @@ def train_run(name='', credits=INIT_CREDS):
             'mutuation': torch.randn((BATCH_SIZE*2, 50), dtype=torch.float32, device=DEVICE)}
   
   import pickle
-  good_weights = pickle.load(open('good_weights.pkl', 'rb'))
+  good_weights = pickle.load(open('perfect_dna.pkl', 'rb'))
   golden_params = {}
   golden_params['input'] = torch.cat([good_weights[0].T[None,:,:].to(device=DEVICE)  for _ in range(BATCH_SIZE*2)], dim=0)
   golden_params['bias'] = torch.cat([good_weights[1][None,:].to(device=DEVICE) for _ in range(BATCH_SIZE*2)], dim=0)
@@ -197,7 +197,7 @@ def train_run(name='', credits=INIT_CREDS):
       writer.add_scalar('total_moves', games.total_moves, step)
       writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
     if step % 1000 == 0:
-      pickle.dump(players.params, open('player_params.pkl', 'wb'))
+      pickle.dump(players.params, open('organic_dna.pkl', 'wb'))
       games = Games(bs=BATCH_SIZE*2)
       finish_games(games, golden_players, players, test=True) 
       
@@ -209,7 +209,7 @@ def train_run(name='', credits=INIT_CREDS):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(1,7):
+  for i in range(2,20, 4):
     mutation_rate = 10**(-i)
     name = f'run2_{i}'
     train_run(name=name, credits=i)

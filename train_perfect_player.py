@@ -137,5 +137,5 @@ good_weights = []
 for param in model.parameters():
     good_weights.append(param.data)
 print('Saving weights...')
-with open('perfect_player_weights.pkl', 'wb') as f:
+with open('perfect_dna.pkl', 'wb') as f:
   pickle.dump(good_weights, f)
