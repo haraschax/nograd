@@ -1,14 +1,11 @@
 
-
-
 import torch
 import time
+from helpers import PLAYERS, next_player, BOARD_SIZE
 import torch.nn.functional as F
 
 MAX_MOVES = 10
 BATCH_SIZE = 10000
-BOARD_ROWS, BOARD_COLS = 3, 3
-BOARD_SIZE = BOARD_ROWS * BOARD_COLS
 INIT_CREDS = 2
 EMBED_N = 128
 NOISE_SIZE = 9
@@ -80,9 +77,9 @@ class Games():
 
 
 class Players():
-  def __init__(self, credits, params):
-    self.credits = credits
+  def __init__(self, params, credits=None):
     self.params = params
+    self.credits = credits
 
   def play(self, boards, test=False):
     boards_onehot = torch.zeros((boards.shape[0], BOARD_SIZE, 3), dtype=torch.float32, device=DEVICE)
@@ -102,6 +99,7 @@ class Players():
     return moves
   
   def mate(self, mutation_rate=1e-4):
+    assert self.credits is not None, "Credits must be set before mating."
     mutation_rate = torch.exp(self.params['mutuation'].sum(dim=1))
     dead = (self.credits == 0).nonzero(as_tuple=True)[0]
     can_mate = (self.credits > INIT_CREDS).nonzero(as_tuple=True)[0]
@@ -123,7 +121,6 @@ class Players():
 
   def avg_log_mutuation(self):
     return self.params['mutuation'].sum(dim=1).float().mean().item()
-
 
 def finish_games(games, x_players, o_players, test=False):
   while True:
@@ -175,21 +172,21 @@ def train_run(name='', mutation_rate=1e-4):
   golden_params['bias'] = torch.cat([good_weights[1][None,:].to(device=DEVICE) for _ in range(BATCH_SIZE*2)], dim=0)
   golden_params['output'] = torch.cat([good_weights[2].T[None,:,:].to(device=DEVICE) for _ in range(BATCH_SIZE*2)], dim=0)
 
-  golden_players = Players(torch.zeros((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE), golden_params)
+  golden_players = Players(golden_params)
 
 
-  players = Players(credits, params)
+  players = Players(params, credits)
   t_start = time.time()
   for step in range(1000000):
     t0 = time.time()
     games = Games()
     indices = torch.randperm(BATCH_SIZE*2)
-    x_players = Players(players.credits[indices][:BATCH_SIZE], splice_params(players.params, indices[:BATCH_SIZE]))
-    o_players = Players(players.credits[indices][BATCH_SIZE:], splice_params(players.params, indices[BATCH_SIZE:]))
+    x_players = Players(splice_params(players.params, indices[:BATCH_SIZE]), players.credits[indices][:BATCH_SIZE])
+    o_players = Players(splice_params(players.params, indices[BATCH_SIZE:]), players.credits[indices][BATCH_SIZE:])
     t1 = time.time()
     finish_games(games, x_players, o_players)
     t2 = time.time()
-    players = Players(torch.cat([x_players.credits, o_players.credits]), concat_params(x_players.params, o_players.params))
+    players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]))
     players.mate(mutation_rate=mutation_rate)
     t3 = time.time()
     if step % 100 == 0:
