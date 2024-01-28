@@ -126,21 +126,20 @@ class Players():
   def avg_log_mutuation(self):
     return self.params['mutuation'].sum(dim=1).float().mean().item()
 
-def finish_games(games, x_players, o_players, test=False):
+def play_games(games, x_players, o_players, test=False):
+  player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
+  current_player = PLAYERS.X
   while True:
-    moves = x_players.play(games.boards, test=test)
-    games.update(moves, PLAYERS.X)
+    moves = player_dict[current_player].play(games.boards, test=test)
+    games.update(moves, current_player)
     if torch.all(games.game_over):
       break
-    moves = o_players.play(games.boards, test=test)
-    games.update(moves, PLAYERS.O)
-    if torch.all(games.game_over):
-      break
+    current_player = next_player(current_player)
+  
   if not test:
-    x_players.credits[games.winners == PLAYERS.X] += 1
-    x_players.credits[games.losers == PLAYERS.X] -= 1
-    o_players.credits[games.winners == PLAYERS.O] += 1
-    o_players.credits[games.losers == PLAYERS.O] -= 1
+    for player in player_dict:
+      player_dict[player].credits[games.winners == player] += 1
+      player_dict[player].credits[games.losers == player] -= 1
 
 
 def splice_params(params, indices):
@@ -177,7 +176,7 @@ def train_run(name='', credits=INIT_CREDS):
     x_players = Players(splice_params(players.params, indices[:BATCH_SIZE]), players.credits[indices][:BATCH_SIZE])
     o_players = Players(splice_params(players.params, indices[BATCH_SIZE:]), players.credits[indices][BATCH_SIZE:])
     t1 = time.time()
-    finish_games(games, x_players, o_players)
+    play_games(games, x_players, o_players)
     t2 = time.time()
     players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]))
     players.mate()
@@ -192,7 +191,7 @@ def train_run(name='', credits=INIT_CREDS):
     if step % 1000 == 0:
       pickle.dump(players.params, open('organic_dna.pkl', 'wb'))
       games = Games(bs=BATCH_SIZE*2, device=DEVICE)
-      finish_games(games, perfect_players, players, test=True) 
+      play_games(games, perfect_players, players, test=True) 
       
       print(f'Vs perfect player avg total moves: {games.total_moves:.2f}, X win rate: {(games.winners == PLAYERS.X).float().mean():.2f}, O win rate: {(games.winners == PLAYERS.O).float().mean():.2f}')
       writer.add_scalar('perfect_total_moves', games.total_moves, step)
