@@ -35,12 +35,11 @@ generate_valid_boards(initial_board, -1, all_boards, seen_boards)  # Start with 
 
 
 def get_optimal_move(board, player):
-    if is_winner(board, player):
-        return None, 1  # Already won, no move necessary
-    if is_draw(board):
-        return None, 0  # Draw, no move necessary
+    assert not is_winner(board, player)
+    assert not is_winner(board, -player)
+    assert not is_draw(board)
     
-    best_score = -float('inf')
+    best_score = -2
     best_move = None
 
     for i in range(3):
@@ -50,6 +49,8 @@ def get_optimal_move(board, player):
                 
                 if is_winner(board, player):  # If the move leads to a win
                     score = 1
+                elif is_winner(board, -player):
+                    assert False
                 elif is_draw(board):  # If the move leads to a draw
                     score = 0
                 else:  # Otherwise, the opponent makes their optimal move

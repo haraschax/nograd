@@ -31,7 +31,7 @@ class TicTacToeDataset(Dataset):
 
         board = boards_onehot.flatten().astype(np.float32)
         
-        board = np.concatenate([board, torch.randn((9,))])
+        board = np.concatenate([board, torch.zeros((9,))])
         board = torch.tensor(board, dtype=torch.float32)  # Convert board to tensor and flatten
         move = move[0] * 3 + move[1]  # Convert move to single integer
         return board, move
@@ -46,7 +46,7 @@ class TicTacToeDataset(Dataset):
 # Create dataset and dataloader
 import pickle
 dataset = TicTacToeDataset(pickle.load(open('move_pairs.pkl', 'rb')))
-data_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+data_loader = DataLoader(dataset, batch_size=128, shuffle=True)
 
 
 
@@ -66,7 +66,7 @@ class TicTacToeNN(nn.Module):
 # Instantiate the model, loss function and optimizer
 model = TicTacToeNN()
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = optim.Adam(model.parameters(), lr=0.01)
 
 epochs = 1000
 for epoch in range(epochs):

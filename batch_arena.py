@@ -6,11 +6,11 @@ import time
 import torch.nn.functional as F
 
 MAX_MOVES = 10
-BATCH_SIZE = 5000
+BATCH_SIZE = 10000
 BOARD_ROWS, BOARD_COLS = 3, 3
 BOARD_SIZE = BOARD_ROWS * BOARD_COLS
 INIT_CREDS = 2
-EMBED_N = 32
+EMBED_N = 128
 NOISE_SIZE = 9
 import pickle
 
@@ -30,25 +30,29 @@ class Games():
     self.entropy  = {PLAYERS.X : torch.zeros((self.bs,), dtype=torch.float32, device=DEVICE),
                      PLAYERS.O: torch.zeros((self.bs,), dtype=torch.float32, device=DEVICE)}
     self.update_game_over()
+    self.old_boards = []
+    self.old_moves = []
 
 
   def update(self, moves, player, test=False):
+    self.old_boards.append(self.boards.clone())
     assert len(moves) == self.bs
     assert len(moves) == self.boards.shape[0]
 
     #self.entropy[player] += -torch.sum(moves * torch.log(moves + 1e-8), dim=1)
     #if test:
     move_idxs = torch.argmax(moves, dim=1, keepdim=True)
+    self.old_moves.append(move_idxs)
     #else:
     #  move_idxs = torch.multinomial(moves, num_samples=1)
     
     illegal_movers = self.boards.gather(1, move_idxs) != PLAYERS.NONE
-    self.winners[illegal_movers[:,0]] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
+    self.winners[(illegal_movers[:,0]) & (self.game_over == 0)] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
 
     move_scattered = torch.zeros_like(self.boards.to(dtype=torch.bool))
     move_scattered.scatter_(1, move_idxs, 1)
 
-    self.boards = self.boards + move_scattered * player
+    self.boards = self.boards + (self.game_over == 0)[:,None] * move_scattered * player
     self.check_winners()
     self.update_game_over()
 
@@ -104,7 +108,11 @@ class Players():
     boards_onehot[:,:,0] = boards == PLAYERS.NONE
     boards_onehot[:,:,1] = boards == PLAYERS.X
     boards_onehot[:,:,2] = boards == PLAYERS.O
-    inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), torch.rand_like(boards.float())], dim=1)
+    if test:
+      noise = 0.5*torch.ones_like(boards.float())
+    else:
+      noise = torch.randn_like(boards.float())
+    inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), noise], dim=1)
     embed = torch.einsum('bji, bj->bi', self.params['input'], inputs)
     embed = embed + self.params['bias']
     embed = torch.relu(embed)
@@ -114,25 +122,29 @@ class Players():
         embed = torch.relu(embed + self.params['block_bias'][:,i])
     moves = torch.einsum('bji, bj->bi', self.params['output'], embed)
     moves = torch.softmax(moves, dim=1)
-    if not test:
-      random_moves = torch.rand(moves.shape[:1], device=DEVICE) < 1e-1
-      moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
+    #if not test:
+    #  random_moves = torch.rand(moves.shape[:1], device=DEVICE) < 1e-1
+    #  moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
     return moves
   
   def mate(self, mutation_rate=1e-4):
-    #mutation_rate = torch.tensor(torch.exp(self.params['mutuation'].sum(dim=1)), device=DEVICE) + 1e-4
+    mutation_rate = torch.tensor(torch.exp(self.params['mutuation'].sum(dim=1)), device=DEVICE)# + 1e-4
     dead = (self.credits == 0).nonzero(as_tuple=True)[0]
     can_mate = (self.credits > INIT_CREDS).nonzero(as_tuple=True)[0]
     assert len(can_mate) >= len(dead)
     self.credits[dead] = INIT_CREDS
     self.credits[can_mate[:len(dead)]] -= INIT_CREDS
     for key in self.params:
-      #if key in ['input', 'output', 'block']:
-      #  mutation_rate_full = mutation_rate.reshape((-1, 1, 1)).repeat((1, self.params[key].shape[1], self.params[key].shape[2]))
-      #else:
-      #  mutation_rate_full = mutation_rate.reshape((-1, 1)).repeat((1, self.params[key].shape[1]))
+      if key in ['block']:
+        mutation_rate_full = mutation_rate.reshape((-1, 1, 1,1)).repeat((1, self.params[key].shape[1], self.params[key].shape[2], self.params[key].shape[3]))
+ 
+      elif key in ['input', 'output', 'block_bias']:
+        mutation_rate_full = mutation_rate.reshape((-1, 1, 1)).repeat((1, self.params[key].shape[1], self.params[key].shape[2]))
+      else:
+        mutation_rate_full = mutation_rate.reshape((-1, 1)).repeat((1, self.params[key].shape[1]))
       param = torch.clone(self.params[key])
-      mutation = (torch.rand_like(param) < mutation_rate).float()
+      #mutation = (torch.rand_like(param) < mutation_rate).float()
+      mutation = (torch.rand_like(param) < mutation_rate_full).float()
       new_param = (1 - mutation) * param + mutation * (torch.randn_like(param))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
 
@@ -179,8 +191,8 @@ def train_run(name='', mutation_rate=1e-4):
   credits = INIT_CREDS * torch.ones((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE)
 
   params = {'input': torch.randn((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float32, device=DEVICE),
-            'block': torch.randn((BATCH_SIZE*2, 3, EMBED_N, EMBED_N), dtype=torch.float32, device=DEVICE),
-            'block_bias': torch.randn((BATCH_SIZE*2, 3, EMBED_N), dtype=torch.float32, device=DEVICE),
+            #'block': torch.randn((BATCH_SIZE*2, 3, EMBED_N, EMBED_N), dtype=torch.float32, device=DEVICE),
+            #'block_bias': torch.randn((BATCH_SIZE*2, 3, EMBED_N), dtype=torch.float32, device=DEVICE),
             'bias': torch.randn((BATCH_SIZE*2, EMBED_N), dtype=torch.float32, device=DEVICE),
             'output': torch.randn((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float32, device=DEVICE),
             'mutuation': torch.randn((BATCH_SIZE*2, 50), dtype=torch.float32, device=DEVICE)}
@@ -216,24 +228,19 @@ def train_run(name='', mutation_rate=1e-4):
       print(f'Average total moves: {games.total_moves:.2f}, avg credits of X: {x_players.credits.float().mean():.2f}, avg credits of O: {o_players.credits.float().mean():.2f}')
       print(f'Average log mutuation: {players.avg_log_mutuation():.2e} and average entropy of X: {games.per_move_entropy[PLAYERS.X].mean():.2f}, O: {games.per_move_entropy[PLAYERS.O].mean():.2f}')
       writer.add_scalar('total_moves', games.total_moves, step)
-      #writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
-      writer.add_scalar('avg_x_entropy', games.per_move_entropy[PLAYERS.X].mean(), step)
-      writer.add_scalar('avg_y_entropy', games.per_move_entropy[PLAYERS.O].mean(), step)
+      writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
+      #writer.add_scalar('avg_x_entropy', games.per_move_entropy[PLAYERS.X].mean(), step)
+      #writer.add_scalar('avg_y_entropy', games.per_move_entropy[PLAYERS.O].mean(), step)
       #print(games.total_moves, x_players.credits.float().mean(), o_players.credits.float().mean())
     if step % 1000 == 0:
       pickle.dump(players.params, open('player_params.pkl', 'wb'))
       games = Games(bs=BATCH_SIZE*2)
-      finish_games(games, golden_players, players, test=True)
-      for i in range(BATCH_SIZE):
-        if games.winners[i] == PLAYERS.O:
-          if (games.boards != PLAYERS.NONE).sum(dim=1).float()[i] == 9:
-            print('Found a perfect player bug')
-            print(games.boards[i].reshape((3,3)))
-      
+      finish_games(games, golden_players, players, test=True) 
       
       print(f'Vs perfect player avg total moves: {games.total_moves:.2f}, X win rate: {(games.winners == PLAYERS.X).float().mean():.2f}, O win rate: {(games.winners == PLAYERS.O).float().mean():.2f}')
       writer.add_scalar('perfect_total_moves', games.total_moves, step)
-      writer.add_scalar('perfect_win_rate',(games.winners == PLAYERS.X).float().mean(), step)
+      writer.add_scalar('perfect_loss_rate',(games.winners == PLAYERS.X).float().mean(), step)
+      writer.add_scalar('perfect_draw_rate',(games.winners == PLAYERS.NONE).float().mean(), step)
 
     #if games.total_moves > 7.5:
     #  print(f' {cnt} games took {t3-t_start:.2f} seconds to achieve 7.5')

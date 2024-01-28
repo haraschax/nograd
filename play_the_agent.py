@@ -58,12 +58,14 @@ games = Games(bs=1)
 BATCH_SIZE = 1
 credits = INIT_CREDS * torch.ones((BATCH_SIZE,), dtype=torch.int8, device=DEVICE)
 
-params = pickle.load(open('player_params.pkl', 'rb'))
-new_params = {}
-for key in params:
-  new_params[key] = params[key][:BATCH_SIZE]
 
-players = Players(credits, new_params)
+good_weights = pickle.load(open('good_weights.pkl', 'rb'))
+golden_params = {}
+golden_params['input'] = torch.cat([good_weights[0].T[None,:,:].to(device=DEVICE)  for _ in range(BATCH_SIZE)], dim=0)
+golden_params['bias'] = torch.cat([good_weights[1][None,:].to(device=DEVICE) for _ in range(BATCH_SIZE)], dim=0)
+golden_params['output'] = torch.cat([good_weights[2].T[None,:,:].to(device=DEVICE) for _ in range(BATCH_SIZE)], dim=0)
+
+players = Players(credits, golden_params)
 
 
 
@@ -80,10 +82,11 @@ while not games.game_over[0]:
       move = torch.zeros((3,3), device=DEVICE)
       
       move[clicked_row, clicked_col] = 1
-      games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X)
+      games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X, test=True)
       if not games.game_over[0]:
-        move = players.play(games.boards)
-        games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.O)
+        move = players.play(games.boards, test=True)
+        print(move)
+        games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.O, test=True)
 
   draw_figures(games.boards.cpu().reshape((3,3)).numpy())
   pygame.display.update()
