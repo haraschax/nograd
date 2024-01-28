@@ -2,7 +2,6 @@
 import pickle
 import torch
 torch.set_grad_enabled(False)
-import time
 import torch.nn.functional as F
 from helpers import PLAYERS, next_player, BOARD_SIZE
 from tensorboardX import SummaryWriter
@@ -168,24 +167,17 @@ def train_run(name='', credits=INIT_CREDS):
   perfect_params = pickle.load(open('perfect_dna.pkl', 'rb'))
   perfect_players = Players.from_params(perfect_params, bs=BATCH_SIZE*2, device=DEVICE)
 
-  t_start = time.time()
   for step in range(100000):
-    t0 = time.time()
     games = Games()
     indices = torch.randperm(BATCH_SIZE*2)
     x_players = Players(splice_params(players.params, indices[:BATCH_SIZE]), players.credits[indices][:BATCH_SIZE])
     o_players = Players(splice_params(players.params, indices[BATCH_SIZE:]), players.credits[indices][BATCH_SIZE:])
-    t1 = time.time()
     play_games(games, x_players, o_players)
-    t2 = time.time()
     players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]))
     players.mate()
-    t3 = time.time()
     if step % 100 == 0:
       print(f'{step} games took {t3-t_start:.2f} seconds')
-      print(t1-t0, t2-t1, t3-t2)
       print(f'Average total moves: {games.total_moves:.2f}, avg credits of X: {x_players.credits.float().mean():.2f}, avg credits of O: {o_players.credits.float().mean():.2f}')
-      print(f'Average log mutuation: {players.avg_log_mutuation():.2e}')
       writer.add_scalar('total_moves', games.total_moves, step)
       writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
     if step % 1000 == 0:
@@ -201,8 +193,7 @@ def train_run(name='', credits=INIT_CREDS):
   writer.close()
   
 if __name__ == '__main__':
-  with torch.no_grad():
-    for i in range(3,20, 4):
-      mutation_rate = 10**(-i)
-      name = f'run2_{i}'
-      train_run(name=name, credits=i)
+  for i in range(2,20, 4):
+    mutation_rate = 10**(-i)
+    name = f'run2_{i}'
+    train_run(name=name, credits=i)
