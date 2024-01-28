@@ -1,12 +1,13 @@
-from batch_arena import Games, PLAYERS, EMBED_N, BOARD_SIZE, DEVICE, Players, INIT_CREDS, BOARD_COLS, BOARD_ROWS
-
+#!/usr/bin/env python
 import os
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
 import pygame
-import random
+import argparse
 import time
 import torch
 import pickle
+from helpers import PLAYERS, BOARD_ROWS, BOARD_COLS, BOARD_SIZE
+from batch_arena import Games, Players
 
 # Initialize Pygame
 pygame.init()
@@ -51,16 +52,19 @@ def draw_figures(board):
 
 
 if __name__ == '__main__':
-  draw_lines()
-  games = Games(bs=1)
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--perfect', action='store_true', help='Play vs perfect player')
+  args = parser.parse_args()
 
-  BATCH_SIZE = 1
-  good_weights = pickle.load(open('perfect_dna.pkl', 'rb'))
-  golden_params = {}
-  golden_params['input'] = torch.cat([good_weights[0].T[None,:,:].to(device=DEVICE)  for _ in range(BATCH_SIZE)], dim=0)
-  golden_params['bias'] = torch.cat([good_weights[1][None,:].to(device=DEVICE) for _ in range(BATCH_SIZE)], dim=0)
-  golden_params['output'] = torch.cat([good_weights[2].T[None,:,:].to(device=DEVICE) for _ in range(BATCH_SIZE)], dim=0)
-  players = Players(golden_params)
+  draw_lines()
+  device = 'cpu'
+  games = Games(bs=1, device=device)
+
+  if args.perfect:
+    params = pickle.load(open('perfect_dna.pkl', 'rb'))
+  else:
+    params = pickle.load(open('organic_dna.pkl', 'rb'))
+  players = Players.from_params(params, device=device)
 
   while not games.game_over[0]:
     for event in pygame.event.get():
@@ -72,7 +76,7 @@ if __name__ == '__main__':
 
         clicked_row = int(mouseY // SQUARE_SIZE)
         clicked_col = int(mouseX // SQUARE_SIZE)
-        move = torch.zeros((3,3), device=DEVICE)
+        move = torch.zeros((3,3), device=device)
         
         move[clicked_row, clicked_col] = 1
         games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X)

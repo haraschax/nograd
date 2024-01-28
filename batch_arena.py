@@ -1,31 +1,30 @@
-
+#!/usr/bin/env python
+import pickle
 import torch
+torch.set_grad_enabled(False)
 import time
-from helpers import PLAYERS, next_player, BOARD_SIZE
 import torch.nn.functional as F
+from helpers import PLAYERS, next_player, BOARD_SIZE
+from tensorboardX import SummaryWriter
+
 
 MAX_MOVES = 10
 BATCH_SIZE = 10000
 INIT_CREDS = 2
 EMBED_N = 128
 NOISE_SIZE = 9
-import pickle
+MUTATION_PARAMS_SIZE = 50
 
 DEVICE = 'cuda'
 
-class PLAYERS:
-  NONE = 0
-  X = 1
-  O = 2
-
 
 class Games():
-  def __init__(self, bs=BATCH_SIZE):
+  def __init__(self, bs=BATCH_SIZE, device=DEVICE):
     self.bs = bs
-    self.boards = torch.zeros((self.bs, BOARD_SIZE), dtype=torch.int8, device=DEVICE)
-    self.winners = torch.zeros((self.bs,), dtype=torch.int8, device=DEVICE)
+    self.device = device
+    self.boards = torch.zeros((self.bs, BOARD_SIZE), dtype=torch.int8, device=self.device)
+    self.winners = torch.zeros((self.bs,), dtype=torch.int8, device=self.device)
     self.update_game_over()
-
 
   def update(self, moves, player):
     assert len(moves) == self.bs
@@ -35,6 +34,7 @@ class Games():
     
     illegal_movers = self.boards.gather(1, move_idxs) != PLAYERS.NONE
     self.winners[(illegal_movers[:,0]) & (self.game_over == 0)] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
+    self.update_game_over()
 
     move_scattered = torch.zeros_like(self.boards.to(dtype=torch.bool))
     move_scattered.scatter_(1, move_idxs, 1)
@@ -47,7 +47,7 @@ class Games():
     boards = self.boards.reshape((-1, 3, 3))
     M, rows, cols = boards.shape
     assert rows == 3 and cols == 3, "Each board must be a 3x3 grid."
-    winners = torch.zeros(M, dtype=torch.int8, device=DEVICE)
+    winners = torch.zeros(M, dtype=torch.int8, device=self.device)
     for player in [PLAYERS.X, PLAYERS.O]:
       rows_winner = torch.any(torch.all(boards == player, dim=1), dim=1)
       cols_winner = torch.any(torch.all(boards == player, dim=2), dim=1)
@@ -77,15 +77,20 @@ class Games():
 
 
 class Players():
+
+  @classmethod
+  def from_params(cls, params, bs=1, credits=None, device=DEVICE):
+    new_params = {}
+    for k in params:
+      new_params[k] =  torch.cat([params[k][0:1].to(device=device)  for _ in range(bs)], dim=0)
+    return cls(new_params, credits)
+
   def __init__(self, params, credits=None):
     self.params = params
     self.credits = credits
 
   def play(self, boards, test=False):
-    boards_onehot = torch.zeros((boards.shape[0], BOARD_SIZE, 3), dtype=torch.float32, device=DEVICE)
-    boards_onehot[:,:,0] = boards == PLAYERS.NONE
-    boards_onehot[:,:,1] = boards == PLAYERS.X
-    boards_onehot[:,:,2] = boards == PLAYERS.O
+    boards_onehot = F.one_hot(boards.long(), num_classes=3).reshape((boards.shape[0], -1))
     if test:
       noise = 0.5*torch.ones_like(boards.float())
     else:
@@ -100,20 +105,19 @@ class Players():
   
   def mate(self, init_credits=INIT_CREDS):
     assert self.credits is not None, "Credits must be set before mating."
-    mutation_rate = torch.exp(self.params['mutuation'].sum(dim=1))
+    # Clamp mutation rate to prevent getting stuck
+    log_mutation_rate = torch.clamp(self.params['mutuation'].sum(dim=1), -15, 0)
+    mutation_rate = torch.exp(log_mutation_rate)
     dead = (self.credits == 0).nonzero(as_tuple=True)[0]
     can_mate = (self.credits > init_credits).nonzero(as_tuple=True)[0]
     assert len(can_mate) >= len(dead)
     self.credits[dead] = init_credits
     self.credits[can_mate[:len(dead)]] -= init_credits
     for key in self.params:
-      if key in ['block']:
-        mutation_rate_full = mutation_rate.reshape((-1, 1, 1,1)).repeat((1, self.params[key].shape[1], self.params[key].shape[2], self.params[key].shape[3]))
- 
-      elif key in ['input', 'output', 'block_bias']:
-        mutation_rate_full = mutation_rate.reshape((-1, 1, 1)).repeat((1, self.params[key].shape[1], self.params[key].shape[2]))
-      else:
-        mutation_rate_full = mutation_rate.reshape((-1, 1)).repeat((1, self.params[key].shape[1]))
+      # repeat mutation rate to match shape of params
+      shape = self.params[key].shape
+      unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
+      mutation_rate_full = mutation_rate.reshape(unsqueezed_shape).expand(shape)
       param = torch.clone(self.params[key])
       mutation = (torch.rand_like(param) < mutation_rate_full).float()
       new_param = (1 - mutation) * param + mutation * (torch.randn_like(param))
@@ -152,30 +156,19 @@ def concat_params(params1, params2):
   return new_params
 
 
-
-from tensorboardX import SummaryWriter
-
 def train_run(name='', credits=INIT_CREDS):
   writer = SummaryWriter(f'runs/{name}')
 
   credits = credits * torch.ones((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE)
-
   params = {'input': torch.randn((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float32, device=DEVICE),
             'bias': torch.randn((BATCH_SIZE*2, EMBED_N), dtype=torch.float32, device=DEVICE),
             'output': torch.randn((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float32, device=DEVICE),
-            'mutuation': torch.randn((BATCH_SIZE*2, 50), dtype=torch.float32, device=DEVICE)}
-  
-  import pickle
-  good_weights = pickle.load(open('perfect_dna.pkl', 'rb'))
-  golden_params = {}
-  golden_params['input'] = torch.cat([good_weights[0].T[None,:,:].to(device=DEVICE)  for _ in range(BATCH_SIZE*2)], dim=0)
-  golden_params['bias'] = torch.cat([good_weights[1][None,:].to(device=DEVICE) for _ in range(BATCH_SIZE*2)], dim=0)
-  golden_params['output'] = torch.cat([good_weights[2].T[None,:,:].to(device=DEVICE) for _ in range(BATCH_SIZE*2)], dim=0)
-
-  golden_players = Players(golden_params)
-
-
+            'mutuation': torch.randn((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float32, device=DEVICE)}
   players = Players(params, credits)
+
+  perfect_params = pickle.load(open('perfect_dna.pkl', 'rb'))
+  perfect_players = Players.from_params(perfect_params, bs=BATCH_SIZE*2, device=DEVICE)
+
   t_start = time.time()
   for step in range(100000):
     t0 = time.time()
@@ -198,8 +191,8 @@ def train_run(name='', credits=INIT_CREDS):
       writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
     if step % 1000 == 0:
       pickle.dump(players.params, open('organic_dna.pkl', 'wb'))
-      games = Games(bs=BATCH_SIZE*2)
-      finish_games(games, golden_players, players, test=True) 
+      games = Games(bs=BATCH_SIZE*2, device=DEVICE)
+      finish_games(games, perfect_players, players, test=True) 
       
       print(f'Vs perfect player avg total moves: {games.total_moves:.2f}, X win rate: {(games.winners == PLAYERS.X).float().mean():.2f}, O win rate: {(games.winners == PLAYERS.O).float().mean():.2f}')
       writer.add_scalar('perfect_total_moves', games.total_moves, step)
@@ -209,7 +202,8 @@ def train_run(name='', credits=INIT_CREDS):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(2,20, 4):
-    mutation_rate = 10**(-i)
-    name = f'run2_{i}'
-    train_run(name=name, credits=i)
+  with torch.no_grad():
+    for i in range(3,20, 4):
+      mutation_rate = 10**(-i)
+      name = f'run2_{i}'
+      train_run(name=name, credits=i)

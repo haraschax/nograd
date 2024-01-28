@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 from helpers import PLAYERS, next_player
 from tqdm import tqdm
 import pickle
@@ -133,9 +134,15 @@ for step in pbar:
         total_loss += loss.item()
     
     pbar.set_description(f'Epoch {step+1}/{steps}, Loss: {total_loss/len(data_loader)}')
-good_weights = []
-for param in model.parameters():
-    good_weights.append(param.data)
+params = list(model.parameters())
+names = ['input', 'bias', 'output']
+save_params = {}
+for name_, param in zip(names, params):
+  if len(param.data.shape) == 2:
+    save_params[name_] = param.data.T[None,:]
+  else:
+    save_params[name_] = param.data[None,:]
+
 print('Saving weights...')
 with open('perfect_dna.pkl', 'wb') as f:
-  pickle.dump(good_weights, f)
+  pickle.dump(save_params, f)
