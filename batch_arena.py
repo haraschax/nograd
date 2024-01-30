@@ -100,6 +100,9 @@ class Players():
     embed = torch.relu(embed)
     moves = torch.einsum('bji, bj->bi', self.params['output'], embed)
     moves = torch.softmax(moves, dim=1)
+    #if not test:
+    #  random_moves = torch.rand(moves.shape[:1], device=DEVICE) < 1e-2
+    #  moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
     return moves
   
   def mate(self, init_credits=INIT_CREDS):
@@ -110,8 +113,8 @@ class Players():
     dead = (self.credits == 0).nonzero(as_tuple=True)[0]
     can_mate = (self.credits > init_credits).nonzero(as_tuple=True)[0]
     assert len(can_mate) >= len(dead)
-    self.credits[dead] = init_credits
-    self.credits[can_mate[:len(dead)]] -= init_credits
+    self.credits[dead] = self.credits[can_mate[:len(dead)]] - self.credits[can_mate[:len(dead)]] // 2
+    self.credits[can_mate[:len(dead)]] = self.credits[can_mate[:len(dead)]] // 2
     for key in self.params:
       # repeat mutation rate to match shape of params
       shape = self.params[key].shape
@@ -121,6 +124,9 @@ class Players():
       mutation = (torch.rand_like(param) < mutation_rate_full).float()
       new_param = (1 - mutation) * param + mutation * (torch.randn_like(param))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
+      mutation2 = (torch.rand_like(param) < mutation_rate_full).float()
+      new_param2 = (1 - mutation) * param + mutation2 * (torch.randn_like(param))
+      self.params[key][can_mate[:len(dead)]] = new_param2[can_mate[:len(dead)]]
 
   def avg_log_mutuation(self):
     return self.params['mutuation'].sum(dim=1).float().mean().item()
@@ -129,6 +135,7 @@ def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
   current_player = PLAYERS.X
   while True:
+
     moves = player_dict[current_player].play(games.boards, test=test)
     games.update(moves, current_player)
     if torch.all(games.game_over):
@@ -145,17 +152,28 @@ def splice_params(params, indices):
     new_params[key] = params[key][indices]
   return new_params
 
-def concat_params(params1, params2):
+def concat_params(params1, params2, slc1=slice(0,None), slc2=slice(0,None)):
   new_params = {}
   for key in params1:
-    new_params[key] = torch.cat([params1[key], params2[key]])
+    new_params[key] = torch.cat([params1[key][slc1], params2[key][slc2]]).clone()
   return new_params
 
+def swizzle_players(players):
+  #n = torch.randint(0, BATCH_SIZE, (1,)).item()
+  #x_players = Players(concat_params(players.params, players.params, slc1=slice(n,n+BATCH_SIZE), slc2=slice(n,n)), torch.cat([players.credits[n:n+BATCH_SIZE], players.credits[n:n]]))
+  #o_players = Players(concat_params(players.params, players.params, slc1=slice(0, n), slc2=slice(n+BATCH_SIZE,None)), torch.cat([players.credits[:n], players.credits[n+BATCH_SIZE:]]))
+  #return x_players, o_players
 
-def train_run(name='', credits=INIT_CREDS):
+  indices = torch.randperm(BATCH_SIZE*2)
+  x_players = Players(splice_params(players.params, indices[:BATCH_SIZE]), players.credits[indices][:BATCH_SIZE])
+  o_players = Players(splice_params(players.params, indices[BATCH_SIZE:]), players.credits[indices][BATCH_SIZE:])
+  return x_players, o_players
+
+
+def train_run(name='', init_credits=INIT_CREDS):
   writer = SummaryWriter(f'runs/{name}')
 
-  credits = credits * torch.ones((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE)
+  credits = init_credits * torch.ones((BATCH_SIZE*2,), dtype=torch.int8, device=DEVICE)
   params = {'input': torch.randn((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float32, device=DEVICE),
             'bias': torch.randn((BATCH_SIZE*2, EMBED_N), dtype=torch.float32, device=DEVICE),
             'output': torch.randn((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float32, device=DEVICE),
@@ -165,24 +183,31 @@ def train_run(name='', credits=INIT_CREDS):
   perfect_params = pickle.load(open('perfect_dna.pkl', 'rb'))
   perfect_players = Players.from_params(perfect_params, bs=BATCH_SIZE*2, device=DEVICE)
 
-  for step in range(100000):
+  import time
+  import tqdm
+  pbar = tqdm.tqdm(range(500000))
+  for step in pbar:
+    t0 = time.time()
     games = Games()
-    indices = torch.randperm(BATCH_SIZE*2)
-    x_players = Players(splice_params(players.params, indices[:BATCH_SIZE]), players.credits[indices][:BATCH_SIZE])
-    o_players = Players(splice_params(players.params, indices[BATCH_SIZE:]), players.credits[indices][BATCH_SIZE:])
+    x_players, o_players = swizzle_players(players)
+    t1 = time.time()
     play_games(games, x_players, o_players)
+    t2 = time.time()
     players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]))
-    players.mate()
+    players.mate(init_credits=init_credits)
+    t3 = time.time()
     if step % 100 == 0:
       print(f'Average total moves: {games.total_moves:.2f}, avg credits of X: {x_players.credits.float().mean():.2f}, avg credits of O: {o_players.credits.float().mean():.2f}')
       writer.add_scalar('total_moves', games.total_moves, step)
       writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
+      string = f'swizzling took {1000*(t1-t0):.2f}ms, playing took {1000*(t2-t1):.2f}ms, mating took {1000*(t3-t2):.2f}ms'
+      pbar.set_description(string)
     if step % 1000 == 0:
       pickle.dump(players.params, open('organic_dna.pkl', 'wb'))
       games = Games(bs=BATCH_SIZE*2, device=DEVICE)
       play_games(games, perfect_players, players, test=True) 
       
-      print(f'Vs perfect player avg total moves: {games.total_moves:.2f}, X win rate: {(games.winners == PLAYERS.X).float().mean():.2f}, O win rate: {(games.winners == PLAYERS.O).float().mean():.2f}')
+      #print(f'Vs perfect player avg total moves: {games.total_moves:.2f}, X win rate: {(games.winners == PLAYERS.X).float().mean():.2f}, O win rate: {(games.winners == PLAYERS.O).float().mean():.2f}')
       writer.add_scalar('perfect_total_moves', games.total_moves, step)
       writer.add_scalar('perfect_loss_rate',(games.winners == PLAYERS.X).float().mean(), step)
       writer.add_scalar('perfect_draw_rate',(games.winners == PLAYERS.NONE).float().mean(), step)
@@ -190,7 +215,7 @@ def train_run(name='', credits=INIT_CREDS):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(2,20, 4):
+  for i in [16]:
     mutation_rate = 10**(-i)
     name = f'run2_{i}'
-    train_run(name=name, credits=i)
+    train_run(name=name, init_credits=3)
