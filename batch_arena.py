@@ -175,9 +175,9 @@ class Players():
     moves = torch.clamp(moves, -1e3, 1e3)
     moves = 5*torch.nn.functional.normalize(moves, dim=1, eps=1e-3)
     moves = torch.softmax(amplitude * moves, dim=1)
-    #if not test:
-    #  random_moves = torch.rand(moves.shape[:1], device=DEVICE) < err
-    #  moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
+    if not test:
+      random_moves = torch.rand(moves.shape[:1], device=DEVICE) < err
+      moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
     return moves
   
   def mate(self, init_credits=INIT_CREDS, alpha=ALPHA):
@@ -336,6 +336,6 @@ if __name__ == '__main__':
     init_credits = 1
     size_factor = 8
     alpha = 0.25
-    err = 1e-2
+    err = 1e-1
     name = f'run2_{i}'
     train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=10000*8//size_factor, alpha=alpha, err=err)
