@@ -164,7 +164,11 @@ class Players():
     embed = embed + self.params['bias']
     embed = torch.relu(embed)
 
-    amplitude = 1
+    if 'amplitude' in self.params:
+      amplitude = self.params['amplitude'].sum(dim=1).reshape((-1,1))
+    else:
+      amplitude = 1.0
+    amplitude = 5.0
     if 'block_a' in self.params:
       for i in range(3):
         embed = torch.einsum('bji, bj->bi', self.params['block_a'][:,i], embed)
@@ -172,9 +176,9 @@ class Players():
         embed = torch.einsum('bji, bj->bi', self.params['block_b'][:,i], embed)
         embed = torch.relu(embed + self.params['block_bias_b'][:,i])
     moves = torch.einsum('bji, bj->bi', self.params['output_w'], embed)
-    moves = torch.clamp(moves, -1e3, 1e3)
-    moves = 5*torch.nn.functional.normalize(moves, dim=1, eps=1e-3)
-    moves = torch.softmax(amplitude * moves, dim=1)
+    moves = torch.nn.functional.normalize(moves, dim=1, eps=1e-3)
+    moves = torch.clamp(amplitude * moves, -1e3, 1e3)
+    moves = torch.softmax(moves, dim=1)
     if not test:
       random_moves = torch.rand(moves.shape[:1], device=DEVICE) < err
       moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
@@ -188,6 +192,8 @@ class Players():
     mutation_rates = torch.exp(log_mutation_rates)
     dead = (self.credits < 1).nonzero(as_tuple=True)[0]
     can_mate = torch.argsort(self.credits, descending=True)#(self.credits > init_credits).nonzero(as_tuple=True)[0]
+    can_mate = can_mate[self.credits[can_mate] >= init_credits*2]
+    dead = dead[:len(can_mate)]
     assert len(can_mate) >= len(dead)
     self.credits[dead] += self.credits[can_mate[:len(dead)]] - self.credits[can_mate[:len(dead)]] // 2
     self.credits[can_mate[:len(dead)]] = self.credits[can_mate[:len(dead)]] // 2
@@ -196,7 +202,7 @@ class Players():
     amplitude = torch.exp(amplitude).reshape(-1,1)
       
     for key in self.params:
-      if False and '_' in key:
+      if '_' in key:
         continue
       # repeat mutation rate to match shape of params
       shape = self.params[key].shape
@@ -216,13 +222,14 @@ class Players():
         #unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
         #amplitude_full = amplitude.reshape(unsqueezed_shape)
         mutate_change = torch.zeros_like(self.params[key]).uniform_(-alpha,alpha)
-        self.params[key][dead] = self.params[key][can_mate[:len(dead)]] + (5 * mutate_change)[can_mate[:len(dead)]]
+        self.params[key][dead] = self.params[key][can_mate[:len(dead)]] + (mutate_change)[can_mate[:len(dead)]]
         mutate_change2 = torch.zeros_like(self.params[key]).uniform_(-alpha,alpha)
-        self.params[key][can_mate[:len(dead)]] = self.params[key][can_mate[:len(dead)]] + (5 * mutate_change2)[can_mate[:len(dead)]]
-        self.params[key] = torch.clamp(self.params[key], -12, 2)
+        self.params[key][can_mate[:len(dead)]] = self.params[key][can_mate[:len(dead)]] + (mutate_change2)[can_mate[:len(dead)]]
+        self.params[key] = torch.clamp(self.params[key], -30, 2)
 
   def avg_log_mutuation(self):
     return self.params['mutation'].sum(dim=1).mean().half().item()
+    #return self.params['input_mutation'].mean().half().item()
 
   #def avg_log_amplitude(self):
   #  return self.params['amplitude'].sum(dim=1).mean().half().item() / 10
@@ -281,10 +288,10 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
   params = {'input': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float16, device=DEVICE),
             'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float16, device=DEVICE),
             'output': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float16, device=DEVICE),
-            'amplitude': (2/MUTATION_PARAMS_SIZE) * torch.ones((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float16, device=DEVICE),
+            'amplitude': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float16, device=DEVICE),
             'mutation': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float16, device=DEVICE)}
-  #for key in list(params.keys()):
-  #  params[key] = params[key].uniform_(-alpha,alpha)
+  for key in list(params.keys()):
+    params[key] = params[key].uniform_(-alpha,alpha)
   #  params[key + '_mutation'] = -1 * torch.ones_like(params[key])
   players = Players(params, credits)
 
@@ -293,7 +300,7 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
 
   import time
   import tqdm
-  pbar = tqdm.tqdm(range(500000))
+  pbar = tqdm.tqdm(range(200000))
   for step in pbar:
     t0 = time.time()
     games = Games(bs=BATCH_SIZE)
@@ -326,16 +333,18 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
       writer.add_scalar('perfect_total_moves', games.total_moves, step)
       writer.add_scalar('perfect_loss_rate',(games.winners == PLAYERS.X).half().mean(), step)
       writer.add_scalar('perfect_draw_rate',(games.winners == PLAYERS.NONE).half().mean(), step)
+    #players.credits -= players.credits.min()
 
 
 
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(25,30):
-    init_credits = 1
+  init_credits_l = [1,2,4,8,16]
+  for i in range(1100,11000):
+    init_credits = 1 #init_credits_l[i -10]
     size_factor = 8
     alpha = 0.25
-    err = 1e-1
+    err = 0
     name = f'run2_{i}'
     train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=10000*8//size_factor, alpha=alpha, err=err)
