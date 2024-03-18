@@ -89,6 +89,8 @@ class Games():
     M, rows, cols = boards.shape
     assert rows == 3 and cols == 3, "Each board must be a 3x3 grid."
     winners = torch.zeros(M, dtype=torch.int8, device=self.device)
+
+    '''
     for player in [PLAYERS.X, PLAYERS.O]:
       rows_winner = torch.any(torch.all(boards == player, dim=1), dim=1)
       cols_winner = torch.any(torch.all(boards == player, dim=2), dim=1)
@@ -114,7 +116,6 @@ class Games():
       winners[idxs] = player
       #print(winners)
     self.winners[self.winners == PLAYERS.NONE] = winners[self.winners == PLAYERS.NONE]
-    '''
 
   @property
   def losers(self):
@@ -341,8 +342,8 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
   
 if __name__ == '__main__':
   init_credits_l = [1,2,4,8,16]
-  for i in range(1100,11000):
-    init_credits = 1 #init_credits_l[i -10]
+  for i in range(1200,11000):
+    init_credits = 9 #init_credits_l[i -10]
     size_factor = 8
     alpha = 0.25
     err = 0
