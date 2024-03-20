@@ -240,10 +240,10 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(0,10):
+  for i in range(1,10):
     init_credits = 1
     size_factor = 8
     alpha = 0.25
-    err = 1e-1
+    err = 0.0
     name = f'run2_{i}'
     train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=10000*8//size_factor, alpha=alpha, err=err)
