@@ -124,12 +124,12 @@ class Players():
     log_mutation_rates = torch.clamp(self.params['mutation'].sum(dim=1) / (alpha * 10), -15, 0)
     mutation_rates = torch.exp(log_mutation_rates)
     dead = (self.credits < 1).nonzero(as_tuple=True)[0]
-    can_mate = torch.argsort(self.credits, descending=True)#(self.credits > init_credits).nonzero(as_tuple=True)[0]
+    can_mate = torch.argsort(self.credits, descending=True)
     can_mate = can_mate[self.credits[can_mate] >= init_credits*2]
     dead = dead[:len(can_mate)]
     assert len(can_mate) >= len(dead)
-    self.credits[dead] += self.credits[can_mate[:len(dead)]] - self.credits[can_mate[:len(dead)]] // 2
-    self.credits[can_mate[:len(dead)]] = self.credits[can_mate[:len(dead)]] // 2
+    self.credits[dead] = self.credits[can_mate[:len(dead)]] // 2
+    self.credits[can_mate[:len(dead)]] -= self.credits[can_mate[:len(dead)]] // 2
       
     for key in self.params:
       shape = self.params[key].shape
@@ -137,11 +137,8 @@ class Players():
       mutation_rate_full = mutation_rates.reshape(unsqueezed_shape).expand(shape)
       param = torch.clone(self.params[key])
       mutation = (torch.rand_like(param) < mutation_rate_full).float()
-      new_param = (1 - 1*mutation) * param + mutation * (torch.zeros_like(param).uniform_(-alpha,alpha))
+      new_param = (1 - 0*mutation) * param + mutation * (torch.zeros_like(param).uniform_(-alpha,alpha))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
-      mutation2 = (torch.rand_like(param) < mutation_rate_full).float()
-      new_param2 = (1 - 1*mutation) * param + mutation2 * (torch.zeros_like(param).uniform_(-alpha,alpha))
-      self.params[key][can_mate[:len(dead)]] = new_param2[can_mate[:len(dead)]]
 
   def avg_log_mutuation(self):
     return self.params['mutation'].sum(dim=1).mean().float().item()
@@ -165,13 +162,13 @@ def play_games(games, x_players, o_players, test=False, err=0.0):
 def splice_params(params, indices):
   new_params = {}
   for key in params:
-    new_params[key] = params[key][indices]
+    new_params[key] = params[key].clone()[indices]
   return new_params
 
 def concat_params(params1, params2, slc1=slice(0,None), slc2=slice(0,None)):
   new_params = {}
   for key in params1:
-    new_params[key] = torch.cat([params1[key][slc1], params2[key][slc2]]).clone()
+    new_params[key] = torch.cat([params1[key].clone()[slc1], params2[key].clone()[slc2]]).clone()
   return new_params
 
 def swizzle_players(players, bs=BATCH_SIZE):
@@ -200,7 +197,7 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
 
   import time
   import tqdm
-  pbar = tqdm.tqdm(range(200000))
+  pbar = tqdm.tqdm(range(500000))
   for step in pbar:
     t0 = time.time()
     games = Games(bs=BATCH_SIZE)
@@ -240,8 +237,8 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(1,10):
-    init_credits = 1
+  for i in range(21,100):
+    init_credits = i - 19
     size_factor = 8
     alpha = 0.25
     err = 0.0
