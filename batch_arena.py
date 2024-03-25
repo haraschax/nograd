@@ -107,6 +107,10 @@ class Players():
     embed = embed + self.params['bias']
     embed = torch.relu(embed)
 
+    if 'amplitude' in self.params:
+      amplitude = (self.params['amplitude'].sum(dim=1) / 10).reshape(-1, 1) + 2
+    else:
+      amplitude = 5.0
     amplitude = 5.0
     moves = torch.einsum('bji, bj->bi', self.params['output'], embed)
     moves = torch.nn.functional.normalize(moves, dim=1, eps=1e-3)
@@ -119,6 +123,7 @@ class Players():
   
   def mate(self, init_credits=INIT_CREDS, alpha=ALPHA):
     self.alpha = alpha
+    init_credits = torch.clamp(self.params['init_credits'].sum(dim=1) / 10, 1., 1000.)
     assert self.credits is not None, "Credits must be set before mating."
     # Clamp mutation rate to prevent getting stuck
     log_mutation_rates = torch.clamp(self.params['mutation'].sum(dim=1) / (alpha * 10), -15, 0)
@@ -137,12 +142,17 @@ class Players():
       mutation_rate_full = mutation_rates.reshape(unsqueezed_shape).expand(shape)
       param = torch.clone(self.params[key])
       mutation = (torch.rand_like(param) < mutation_rate_full).float()
-      new_param = (1 - 0*mutation) * param + mutation * (torch.zeros_like(param).uniform_(-alpha,alpha))
+      new_param = (1 - 1*mutation) * param + mutation * (torch.zeros_like(param).uniform_(-alpha,alpha))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
 
   def avg_log_mutuation(self):
     return self.params['mutation'].sum(dim=1).mean().float().item()
 
+  def init_credits(self):
+    return self.params['init_credits'].sum(dim=1).mean().float().item() / 10
+
+  def amplitude(self):
+    return self.params['amplitude'].sum(dim=1).mean().float().item() / 10 + 2
     
 def play_games(games, x_players, o_players, test=False, err=0.0):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
@@ -186,6 +196,8 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
   params = {'input': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
             'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
             'output': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE),
+            'init_credits': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
+            'amplitude': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
             'mutation': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)}
   for key in list(params.keys()):
     params[key] = params[key].uniform_(-alpha,alpha)
@@ -197,7 +209,7 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
 
   import time
   import tqdm
-  pbar = tqdm.tqdm(range(500000))
+  pbar = tqdm.tqdm(range(5000000))
   for step in pbar:
     t0 = time.time()
     games = Games(bs=BATCH_SIZE)
@@ -214,6 +226,8 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
       writer.add_scalar('total_moves', games.total_moves, step)
       writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
       writer.add_scalar('draw_rate',(games.winners == PLAYERS.NONE).float().mean(), step)
+      writer.add_scalar('init_credits',players.init_credits(), step)
+      writer.add_scalar('amplitude',players.amplitude(), step)
 
     players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]))
     players.mate(init_credits=init_credits, alpha=alpha)
@@ -230,17 +244,17 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
       writer.add_scalar('perfect_total_moves', games.total_moves, step)
       writer.add_scalar('perfect_loss_rate',(games.winners == PLAYERS.X).float().mean(), step)
       writer.add_scalar('perfect_draw_rate',(games.winners == PLAYERS.NONE).float().mean(), step)
-    #players.credits -= players.credits.min()
+    players.credits += max(players.init_credits(), 1.) - players.credits.mean()
 
 
 
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(21,100):
-    init_credits = i - 19
+  for i in range(50,100):
+    init_credits = 1
     size_factor = 8
     alpha = 0.25
-    err = 0.0
+    err = 1e-1
     name = f'run2_{i}'
     train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=10000*8//size_factor, alpha=alpha, err=err)
