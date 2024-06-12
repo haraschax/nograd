@@ -31,7 +31,7 @@ class Games():
     self.winners = torch.zeros((self.bs,), dtype=torch.int8, device=self.device)
     self.update_game_over()
 
-  def update(self, moves, player, test=False):
+  def update(self, moves, player, test=False, player_dict=None):
     assert len(moves) == self.bs
     assert len(moves) == self.boards.shape[0]
 
@@ -40,7 +40,7 @@ class Games():
     else:
       move_idxs = torch.multinomial(moves, num_samples=1)
     #move_idxs = torch.argmax(moves, dim=1, keepdim=True)
-    
+
     illegal_movers = self.boards.gather(1, move_idxs) != PLAYERS.NONE
     self.winners[(illegal_movers[:,0]) & (self.game_over == 0)] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
     self.update_game_over()
@@ -49,10 +49,11 @@ class Games():
     move_scattered.scatter_(1, move_idxs, 1)
 
     self.boards = self.boards + (self.game_over == 0)[:,None] * move_scattered * player
-    self.check_winners()
+    #if test:
+    self.check_winners(player_dict)
     self.update_game_over()
 
-  def check_winners(self):
+  def check_winners(self, player_dict=None):
     boards = self.boards.reshape((-1, 3, 3))
     M, rows, cols = boards.shape
     assert rows == 3 and cols == 3, "Each board must be a 3x3 grid."
@@ -68,7 +69,6 @@ class Games():
       diag2_winner = torch.all(diag2 == player, dim=1)
       winners[diag1_winner | diag2_winner] = player
     self.winners[self.winners == PLAYERS.NONE] = winners[self.winners == PLAYERS.NONE]
-
 
   @property
   def losers(self):
@@ -94,28 +94,39 @@ class Players():
       new_params[k] = torch.cat([params[k][0:1].to(device=device) for _ in range(bs)], dim=0).float()
     return cls(new_params, credits)
 
-  def __init__(self, params, credits=None):
+  def __init__(self, params, credits=None, perfect=None):
     self.params = params
-    self.credits = credits
+    self.credits = credits 
+    self.perfect = perfect
 
-  def play(self, boards, test=False, err=0.0):
+  def play(self, boards, test=False, err=0.0, current_player=PLAYERS.X):
     boards_onehot = F.one_hot(boards.long(), num_classes=3).reshape((boards.shape[0], -1))
-    noise = 0.5*torch.ones_like(boards.float())
+    #factor = 1.0 if current_player == PLAYERS.X else -1.0
+    noise = 0.5 * torch.ones_like(boards.float())
 
     inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), noise], dim=1)
     embed = torch.einsum('bji, bj->bi', self.params['input'], inputs)
-    embed = embed + self.params['bias']
+    if len(self.params['bias'].shape) == 2:
+      embed = embed + self.params['bias']
+    else:
+      embed = embed + self.params['bias'].sum(dim=1)
     embed = torch.relu(embed)
 
     if 'amplitude' in self.params:
-      amplitude = (self.params['amplitude'].sum(dim=1) / 10).reshape(-1, 1) + 2
+      amplitude = torch.clamp((self.params['amplitude'].sum(dim=1) / 10).reshape(-1, 1) + 3, 0, 1000) 
     else:
       amplitude = 5.0
-    amplitude = 5.0
-    moves = torch.einsum('bji, bj->bi', self.params['output'], embed)
-    moves = torch.nn.functional.normalize(moves, dim=1, eps=1e-3)
-    moves = torch.clamp(amplitude * moves, -1e3, 1e3)
+    moves = amplitude*torch.einsum('bji, bj->bi', self.params['output'].clone(), embed.clone())
+
+
+    #cmoves = torch.nn.functional.normalize(moves, dim=1, eps=1e-3)
+    #moves = torch.clamp(moves, -4, 4.)
+    #moves[boards == PLAYERS.NONE] = torch.clamp(moves[boards == PLAYERS.NONE], 0, 4.)
+    #print(boards.shape, moves.shape)
     moves = torch.softmax(moves, dim=1)
+
+    #moves[boards == PLAYERS.NONE] += 1e-2
+    #moves = moves / moves.sum(dim=1, keepdim=True)
     if not test:
       random_moves = torch.rand(moves.shape[:1], device=DEVICE) < err
       moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
@@ -128,6 +139,7 @@ class Players():
     # Clamp mutation rate to prevent getting stuck
     log_mutation_rates = torch.clamp(self.params['mutation'].sum(dim=1) / (alpha * 10), -15, 0)
     mutation_rates = torch.exp(log_mutation_rates)
+    #mutation_rates[:] = 1e-5
     dead = (self.credits < 1).nonzero(as_tuple=True)[0]
     can_mate = torch.argsort(self.credits, descending=True)
     can_mate = can_mate[self.credits[can_mate] >= init_credits*2]
@@ -142,25 +154,31 @@ class Players():
       mutation_rate_full = mutation_rates.reshape(unsqueezed_shape).expand(shape)
       param = torch.clone(self.params[key])
       mutation = (torch.rand_like(param) < mutation_rate_full).float()
-      new_param = (1 - 1*mutation) * param + mutation * (torch.zeros_like(param).uniform_(-alpha,alpha))
+      new_param = (1 - 0*mutation) * param + mutation * (torch.zeros_like(param).uniform_(-alpha,alpha))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
 
   def avg_log_mutuation(self):
-    return self.params['mutation'].sum(dim=1).mean().float().item()
+    return self.params['mutation'].sum(dim=1).mean().float().item() / (alpha * 10)
 
   def init_credits(self):
     return self.params['init_credits'].sum(dim=1).mean().float().item() / 10
 
   def amplitude(self):
     return self.params['amplitude'].sum(dim=1).mean().float().item() / 10 + 2
-    
+
+  def confirm_winning_was_good(self):
+    for idx in range(len(self.won_last_game)):
+      if self.won_last_game[idx]:
+        #print('won', self.credits[idx] - self.last_credits[idx])
+        assert self.credits[idx] > self.last_credits[idx], "Winning should increase credits."
+
 def play_games(games, x_players, o_players, test=False, err=0.0):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
   current_player = PLAYERS.X
   while True:
 
-    moves = player_dict[current_player].play(games.boards, test=test, err=err)
-    games.update(moves, current_player, test=test)
+    moves = player_dict[current_player].play(games.boards, test=test, err=err, current_player=current_player)
+    games.update(moves, current_player, test=test, player_dict=player_dict)
     if torch.all(games.game_over):
       break
     current_player = next_player(current_player)
@@ -183,8 +201,8 @@ def concat_params(params1, params2, slc1=slice(0,None), slc2=slice(0,None)):
 
 def swizzle_players(players, bs=BATCH_SIZE):
   indices = torch.randperm(bs*2)
-  x_players = Players(splice_params(players.params, indices[:bs]), players.credits[indices][:bs])
-  o_players = Players(splice_params(players.params, indices[bs:]), players.credits[indices][bs:])
+  x_players = Players(splice_params(players.params, indices[:bs]), players.credits[indices][:bs], perfect=players.perfect[indices][:bs])
+  o_players = Players(splice_params(players.params, indices[bs:]), players.credits[indices][bs:], perfect=players.perfect[indices][bs:])
   return x_players, o_players
 
 def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, alpha=ALPHA, err=0.1):
@@ -192,24 +210,36 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
 
   EMBED_N = embed_n
   BATCH_SIZE = bs
-  credits = init_credits * torch.ones((BATCH_SIZE*2,), dtype=torch.float32, device=DEVICE)
-  params = {'input': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
-            'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
-            'output': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE),
-            'init_credits': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
-            'amplitude': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
-            'mutation': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)}
-  for key in list(params.keys()):
-    params[key] = params[key].uniform_(-alpha,alpha)
-  #  params[key + '_mutation'] = -1 * torch.ones_like(params[key])
-  players = Players(params, credits)
 
   perfect_params = pickle.load(open('perfect_dna.pkl', 'rb'))
   perfect_players = Players.from_params(perfect_params, bs=BATCH_SIZE*2, device=DEVICE)
 
+  credits = init_credits * torch.ones((BATCH_SIZE*2,), dtype=torch.float32, device=DEVICE)
+  perfect = torch.zeros((BATCH_SIZE*2,), dtype=torch.bool, device=DEVICE)
+  perfect[:BATCH_SIZE*2//2] = 1
+  params = {'input': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
+            'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
+            'output': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE),
+            'init_credits': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
+            'amplitude': (1/10)*torch.ones((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
+            'mutation': (-1/23)*torch.ones((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)}
+  for key in list(params.keys()):
+  #  params[key + '_mutation'] = -1 * torch.ones_like(params[key])
+    #params[key] = params[key].uniform_(-alpha,alpha)
+    params['amplitude'][perfect] = 10000 * torch.ones_like(params['amplitude'][perfect])
+    if key in perfect_params:
+      #params[key] = params[key].uniform_(-alpha,alpha)
+      print(perfect_params[key][0:1].max())
+      params[key][perfect] =  perfect_params[key][0:1].expand_as(params[key]).to(device=DEVICE)[perfect] * alpha / 3 #+ torch.randn_like(params[key]).to(device=DEVICE).uniform_(-alpha/10,alpha/10)
+  players = Players(params, credits, perfect)
+
+
+  
+
+
   import time
   import tqdm
-  pbar = tqdm.tqdm(range(5000000))
+  pbar = tqdm.tqdm(range(200000))
   for step in pbar:
     t0 = time.time()
     games = Games(bs=BATCH_SIZE)
@@ -228,8 +258,11 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
       writer.add_scalar('draw_rate',(games.winners == PLAYERS.NONE).float().mean(), step)
       writer.add_scalar('init_credits',players.init_credits(), step)
       writer.add_scalar('amplitude',players.amplitude(), step)
+      writer.add_scalar('perfect_ratio',players.perfect.float().mean(), step)
 
-    players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]))
+    players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]), torch.cat([x_players.perfect, o_players.perfect]))
+
+    players.credits[players.perfect] = init_credits
     players.mate(init_credits=init_credits, alpha=alpha)
     t3 = time.time()
     if step % 100 == 0:
@@ -238,7 +271,7 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
     if step % 1000 == 0:
       pickle.dump(players.params, open('organic_dna.pkl', 'wb'))
       games = Games(bs=BATCH_SIZE*2, device=DEVICE)
-      play_games(games, perfect_players, players, test=True) 
+      play_games(games, perfect_players, players, test=True)
       
       print(f'Vs perfect player avg total moves: {games.total_moves:.2f}, X win rate: {(games.winners == PLAYERS.X).float().mean():.2f}, O win rate: {(games.winners == PLAYERS.O).float().mean():.2f}')
       writer.add_scalar('perfect_total_moves', games.total_moves, step)
@@ -251,10 +284,11 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(50,100):
+  for i in range(200,1000):
     init_credits = 1
     size_factor = 8
-    alpha = 0.25
+    alpha = 2
     err = 1e-1
+    bs = 5000*8//size_factor
     name = f'run2_{i}'
-    train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=10000*8//size_factor, alpha=alpha, err=err)
+    train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=bs, alpha=alpha, err=err)
