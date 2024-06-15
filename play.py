@@ -57,7 +57,7 @@ if __name__ == '__main__':
   args = parser.parse_args()
 
   draw_lines()
-  device = 'cpu'
+  device = 'cuda'
   games = Games(bs=1, device=device)
 
   if args.perfect:

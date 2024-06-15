@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
-
+EMBED_N = 128
 ###### GET OPTIMAL MOVES ######
 
 def is_winner(board, player):
@@ -99,9 +99,9 @@ class TicTacToeDataset(Dataset):
 class TicTacToeNN(nn.Module):
     def __init__(self):
         super(TicTacToeNN, self).__init__()
-        self.fc1 = nn.Linear(9*4, 128)
+        self.fc1 = nn.Linear(9*4, EMBED_N)
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(128, 9, bias=False)
+        self.fc2 = nn.Linear(EMBED_N, 9, bias=False)
         
     def forward(self, x):
         x = self.fc1(x)
@@ -121,7 +121,7 @@ model = TicTacToeNN()
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.01)
 
-steps = 1000
+steps = 300
 pbar = tqdm(range(steps))
 for step in pbar:
     total_loss = 0
