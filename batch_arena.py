@@ -39,7 +39,6 @@ class Games():
       move_idxs = torch.argmax(moves, dim=1, keepdim=True)
     else:
       move_idxs = torch.multinomial(moves, num_samples=1)
-    #move_idxs = torch.argmax(moves, dim=1, keepdim=True)
 
     illegal_movers = self.boards.gather(1, move_idxs) != PLAYERS.NONE
     self.winners[(illegal_movers[:,0]) & (self.game_over == 0)] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
@@ -49,7 +48,6 @@ class Games():
     move_scattered.scatter_(1, move_idxs, 1)
 
     self.boards = self.boards + (self.game_over == 0)[:,None] * move_scattered * player
-    #if test:
     self.check_winners(player_dict)
     self.update_game_over()
 
@@ -154,7 +152,7 @@ class Players():
       mutation_rate_full = mutation_rates.reshape(unsqueezed_shape).expand(shape)
       param = torch.clone(self.params[key])
       mutation = (torch.rand_like(param) < mutation_rate_full).float()
-      new_param = (1 - 0*mutation) * param + mutation * (torch.zeros_like(param).uniform_(-alpha,alpha))
+      new_param = (1 - 1*mutation) * param + mutation * (torch.zeros_like(param).uniform_(-alpha,alpha))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
 
   def avg_log_mutuation(self):
