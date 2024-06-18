@@ -34,11 +34,11 @@ class Games():
     assert len(moves) == self.bs
     assert len(moves) == self.boards.shape[0]
 
-    #if test:
-    #  move_idxs = torch.argmax(moves, dim=1, keepdim=True)
-    #else:
-    #  move_idxs = torch.multinomial(moves, num_samples=1)
-    move_idxs = torch.argmax(moves, dim=1, keepdim=True)
+    if test:
+      move_idxs = torch.argmax(moves, dim=1, keepdim=True)
+    else:
+      move_idxs = torch.multinomial(moves, num_samples=1)
+    #move_idxs = torch.argmax(moves, dim=1, keepdim=True)
     
     illegal_movers = self.boards.gather(1, move_idxs) != PLAYERS.NONE
     self.winners[(illegal_movers[:,0]) & (self.game_over == 0)] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
@@ -97,7 +97,7 @@ class Players():
     self.credits = credits 
     self.perfect = perfect
 
-  def play(self, boards, test=False, err=0.0, current_player=PLAYERS.X):
+  def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot = F.one_hot(boards.long(), num_classes=3).reshape((boards.shape[0], -1))
     #factor = 1.0 if current_player == PLAYERS.X else -1.0
     noise = 0.5 * torch.ones_like(boards.float())
@@ -114,9 +114,6 @@ class Players():
     moves = amplitude*torch.einsum('bji, bj->bi', self.params['output'].clone(), embed.clone())
 
     moves = torch.softmax(moves, dim=1)
-    if not test:
-      random_moves = torch.rand(moves.shape[:1], device=DEVICE) < err
-      moves = (1 - random_moves.float()[:,None]) * moves + random_moves[:,None] * torch.rand_like(moves)
     return moves
   
   def mate(self, init_credits=INIT_CREDS):
@@ -157,12 +154,12 @@ class Players():
   def amplitude(self):
     return self.params['amplitude'].sum(dim=1).mean().float().item() / 10
 
-def play_games(games, x_players, o_players, test=False, err=0.0):
+def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
   current_player = PLAYERS.X
   while True:
 
-    moves = player_dict[current_player].play(games.boards, test=test, err=err, current_player=current_player)
+    moves = player_dict[current_player].play(games.boards, test=test, current_player=current_player)
     games.update(moves, current_player, test=test, player_dict=player_dict)
     if torch.all(games.game_over):
       break
@@ -190,7 +187,7 @@ def swizzle_players(players, bs=BATCH_SIZE):
   o_players = Players(splice_params(players.params, indices[bs:]), players.credits[indices][bs:], perfect=players.perfect[indices][bs:])
   return x_players, o_players
 
-def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, err=0.1):
+def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
   writer = SummaryWriter(f'runs/{name}')
 
   EMBED_N = embed_n
@@ -201,7 +198,7 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
 
   credits = init_credits * torch.ones((BATCH_SIZE*2,), dtype=torch.float32, device=DEVICE)
   perfect = torch.zeros((BATCH_SIZE*2,), dtype=torch.bool, device=DEVICE)
-  perfect[:BATCH_SIZE*2//2] = 1
+  perfect[:BATCH_SIZE*2//4] = 1
   params = {'input': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
             'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
             'output': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE),
@@ -227,7 +224,7 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
     games = Games(bs=BATCH_SIZE)
     x_players, o_players = swizzle_players(players, bs=BATCH_SIZE)
     t1 = time.time()
-    play_games(games, x_players, o_players, err=err)
+    play_games(games, x_players, o_players)
     t2 = time.time()
     if step % 100 == 0:
       val_games = Games(bs=BATCH_SIZE)
@@ -238,7 +235,6 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE, 
       writer.add_scalar('total_moves', games.total_moves, step)
       writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
       writer.add_scalar('draw_rate',(games.winners == PLAYERS.NONE).float().mean(), step)
-      writer.add_scalar('init_credits',players.init_credits(), step)
       writer.add_scalar('amplitude',players.amplitude(), step)
       writer.add_scalar('perfect_ratio',players.perfect.float().mean(), step)
 
@@ -269,7 +265,6 @@ if __name__ == '__main__':
   for i in range(0,100):
     init_credits = 1
     size_factor = 8
-    err = 0
     bs = 5000*8//size_factor
     name = f'run_{i}'
-    train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=bs, err=err)
+    train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=bs)
