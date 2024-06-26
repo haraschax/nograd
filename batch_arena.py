@@ -99,8 +99,9 @@ class Players():
 
   def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot = F.one_hot(boards.long(), num_classes=3).reshape((boards.shape[0], -1))
-    #factor = 1.0 if current_player == PLAYERS.X else -1.0
     noise = 0.5 * torch.ones_like(boards.float())
+    if self.perfect is not None and not test:
+      noise[~self.perfect] = noise[~self.perfect].uniform_(0, 1)
 
     inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), noise], dim=1)
     embed = torch.einsum('bji, bj->bi', self.params['input'], inputs)
@@ -117,7 +118,6 @@ class Players():
     return moves
   
   def mate(self, init_credits=INIT_CREDS):
-    init_credits = torch.clamp(self.params['init_credits'].sum(dim=1) / 10, 1., 1000.)
     assert self.credits is not None, "Credits must be set before mating."
     # Clamp mutation rate to prevent getting stuck
     log_mutation_rates = torch.clamp(self.params['mutation'].sum(dim=1) / 10, -15, 0)
@@ -139,17 +139,8 @@ class Players():
       new_param = (1 - mutation) * param + mutation * (torch.zeros_like(param).uniform_(-1,1))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
 
-      #mutation_rate_full2 = mutation_rates.reshape(unsqueezed_shape).expand(shape)
-      #mutation2 = (torch.rand_like(param) < mutation_rate_full2).float()
-      #new_param2 = (1 - mutation2) * param + mutation2 * (torch.zeros_like(param).uniform_(-1,1))
-      #self.params[key][can_mate[:len(dead)]] = new_param2[can_mate[:len(dead)]]
-
-
   def avg_log_mutuation(self):
     return self.params['mutation'].sum(dim=1).mean().float().item() / 10
-
-  def init_credits(self):
-    return self.params['init_credits'].sum(dim=1).mean().float().item() / 10
 
   def amplitude(self):
     return self.params['amplitude'].sum(dim=1).mean().float().item() / 10
@@ -202,7 +193,6 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
   params = {'input': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
             'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
             'output': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE),
-            'init_credits': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
             'amplitude': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
             'mutation': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)}
 
@@ -218,7 +208,7 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
 
   import time
   import tqdm
-  pbar = tqdm.tqdm(range(100000))
+  pbar = tqdm.tqdm(range(500000))
   for step in pbar:
     t0 = time.time()
     games = Games(bs=BATCH_SIZE)
@@ -255,7 +245,7 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
       writer.add_scalar('avg_moves_vs_perfect_player', games.total_moves, step)
       writer.add_scalar('loss_rate_vs_perfect_player',(games.winners == PLAYERS.X).float().mean(), step)
       writer.add_scalar('draw_rate_vs_perfect_player',(games.winners == PLAYERS.NONE).float().mean(), step)
-    players.credits += max(players.init_credits(), 1.) - players.credits.mean()
+    players.credits += init_credits - players.credits.mean()
 
 
 
