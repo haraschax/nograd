@@ -12,6 +12,7 @@ To play against one of the players from the population you just trained:
 ```
 ./play.py
 ```
+![Screenshot from 2024-06-27 20-47-01](https://github.com/haraschax/nograd/assets/6804392/cdedd0d5-75d1-4a63-bb73-b464409dcde0)
 
 To play against a perfect player that was trained classically:
 ```
