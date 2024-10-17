@@ -1,21 +1,54 @@
 #!/usr/bin/env python
 import pickle
 import torch
+import math
 torch.set_grad_enabled(False)
 import torch.nn.functional as F
 from helpers import PLAYERS, next_player, BOARD_SIZE
 from tensorboardX import SummaryWriter
 from torch.nn import functional as F
+import torch_dct as dct
 
 MAX_MOVES = 10
 BATCH_SIZE = 10
 INIT_CREDS = 2
 EMBED_N = 128
 NOISE_SIZE = 9
-MUTATION_PARAMS_SIZE = 500
+MUTATION_PARAMS_SIZE = 50
 
 DEVICE = 'cuda'
 
+
+
+def weights_from_dna(dna, shape):
+  #return dna
+  shape = dna.shape
+  #jaja = 8
+  if len(shape) == 2:
+    #for i in range(1, jaja):
+    #  dna[:, i::jaja] = 0
+    output = dct.idct_2d(dna[:,:,None])[...,0]
+  else:
+    #for i in range(1, jaja):
+    #  dna[:, i::jaja,:] = 0
+    #  dna[:, :,i::jaja] = 0
+    output = dct.idct_2d(dna)
+
+  return output
+
+
+shapes = {'input': (BOARD_SIZE*4, EMBED_N), 'bias': (EMBED_N,), 'output': (EMBED_N, BOARD_SIZE), 'mutation': (MUTATION_PARAMS_SIZE,)}
+
+def params_from_dna(params, exclude=None):
+  bs = params['input_dna'].shape[0]
+  for key in ['input', 'bias', 'output']:
+    if exclude is None:
+      params[key] = weights_from_dna(params[key +'_dna'], shapes[key])
+    else:
+      mask = ~exclude
+      params[key][mask] = weights_from_dna(params[key +'_dna'], shapes[key])[mask]
+  assert params['input'].shape[0] == bs
+  return params
 
 def check_winner(board, conv_layer):
     board_tensor = board.float().unsqueeze(1)
@@ -92,6 +125,9 @@ class Players():
     self.credits = credits 
     self.perfect = perfect
 
+  def embryogenesis(self,):
+    self.params = params_from_dna(self.params, exclude=self.perfect)
+
   def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot = F.one_hot(boards.long(), num_classes=3).reshape((boards.shape[0], -1))
     noise = 0.5 * torch.ones_like(boards.float())
@@ -109,8 +145,6 @@ class Players():
   def mate(self, init_credits=INIT_CREDS):
     assert self.credits is not None, "Credits must be set before mating."
     # Clamp mutation rate to prevent getting stuck
-    log_mutation_rates = torch.clamp(self.params['mutation'].sum(dim=1) / 10, -15, 0)
-    mutation_rates = torch.exp(log_mutation_rates)
     dead = (self.credits < 1).nonzero(as_tuple=True)[0]
     can_mate = torch.argsort(self.credits, descending=True)
     can_mate = can_mate[self.credits[can_mate] >= init_credits*2]
@@ -118,18 +152,25 @@ class Players():
     assert len(can_mate) >= len(dead)
     self.credits[dead] = self.credits[can_mate[:len(dead)]] // 2
     self.credits[can_mate[:len(dead)]] -= self.credits[can_mate[:len(dead)]] // 2
-      
+
     for key in self.params:
+      if 'mutation' in key:
+        mutation_rates = torch.sigmoid(self.params['mutation_mutation'].sum(dim=1))
+      elif 'dna' in key:
+        mutation_rates = torch.sigmoid(self.params[f'{key}_mutation'].sum(dim=1))
+      else:
+        continue
       param = torch.clone(self.params[key])
       shape = self.params[key].shape
       unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
       mutation_rate_full = mutation_rates.reshape(unsqueezed_shape).expand(shape)
       mutation = (torch.rand_like(param) < mutation_rate_full).float()
+      mutation = (torch.rand_like(param) < mutation).float()
       new_param = (1 - mutation) * param + mutation * (torch.zeros_like(param).uniform_(-1,1))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
 
   def avg_log_mutuation(self):
-    return self.params['mutation'].sum(dim=1).mean().float().item() / 10
+    return torch.sigmoid(self.params['mutation_mutation'].sum(dim=1).mean().float()).item()
 
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
@@ -176,10 +217,15 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
   credits = init_credits * torch.ones((BATCH_SIZE*2,), dtype=torch.float32, device=DEVICE)
   perfect = torch.zeros((BATCH_SIZE*2,), dtype=torch.bool, device=DEVICE)
   perfect[:BATCH_SIZE*2//4] = 1
-  params = {'input': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
-            'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
-            'output': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE),
-            'mutation': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)}
+
+  params = {'input_dna': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
+            'bias_dna': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
+            'output_dna': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE)}
+  for key in params:
+    params[key + '_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)
+  params['mutation_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)
+
+  params = params_from_dna(params)
 
   for key in list(params.keys()):
     if key in perfect_params:
@@ -197,6 +243,8 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
     t0 = time.time()
     games = Games(bs=BATCH_SIZE)
     x_players, o_players = swizzle_players(players, bs=BATCH_SIZE)
+    x_players.embryogenesis()
+    o_players.embryogenesis()
     t1 = time.time()
     play_games(games, x_players, o_players)
     t2 = time.time()
@@ -235,7 +283,7 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(0,100):
+  for i in range(200,1000):
     init_credits = 1
     size_factor = 8
     bs = 5000*8//size_factor
