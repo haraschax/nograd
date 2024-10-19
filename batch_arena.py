@@ -139,12 +139,11 @@ class Players():
     embed = embed + self.params['bias']
     embed = torch.relu(embed)
 
-    moves = torch.einsum('bji, bj->bi', self.params['output'].clone(), embed.clone())
+    moves = torch.einsum('bji, bj->bi', self.params['output'], embed)
     return moves
   
   def mate(self, init_credits=INIT_CREDS):
     assert self.credits is not None, "Credits must be set before mating."
-    # Clamp mutation rate to prevent getting stuck
     dead = (self.credits < 1).nonzero(as_tuple=True)[0]
     can_mate = torch.argsort(self.credits, descending=True)
     can_mate = can_mate[self.credits[can_mate] >= init_credits*2]
@@ -156,8 +155,8 @@ class Players():
     for key in self.params:
       if 'mutation' in key:
         mutation_rates = torch.sigmoid(self.params['mutation_mutation'].sum(dim=1))
-      elif 'dna' in key:
-        mutation_rates = torch.sigmoid(self.params[f'{key}_mutation'].sum(dim=1))
+      elif 'meta' in key:
+        mutation_rates = torch.sigmoid(self.params[key.replace('meta', 'mutation')].sum(dim=1))
       else:
         continue
       param = torch.clone(self.params[key])
@@ -165,9 +164,23 @@ class Players():
       unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
       mutation_rate_full = mutation_rates.reshape(unsqueezed_shape).expand(shape)
       mutation = (torch.rand_like(param) < mutation_rate_full).float()
-      mutation = (torch.rand_like(param) < mutation).float()
       new_param = (1 - mutation) * param + mutation * (torch.zeros_like(param).uniform_(-1,1))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
+    
+      if 'meta' in key:
+        dna_key = key.replace('_meta', '')
+        orig_size = self.params[dna_key].shape
+        meta_input = self.params[key].reshape((-1, 13))[:,:4].reshape((-1, 1, 4))
+        meta_bias = self.params[key].reshape((-1, 13))[:,4:8].reshape((-1, 4))
+        meta_output = self.params[key].reshape((-1, 13))[:,8:12].reshape((-1, 4, 1))
+        meta_cst = self.params[key].reshape((-1, 13))[:,12].reshape((-1, 1))
+        x = torch.einsum('bji, bj->bi', meta_input, meta_cst)
+        x = x + meta_bias
+        x = torch.relu(x)
+        x = torch.einsum('bji, bj->bi', meta_output, x)
+        self.params[dna_key][dead] = x.reshape(orig_size)[can_mate[:len(dead)]]
+
+
 
   def avg_log_mutuation(self):
     return torch.sigmoid(self.params['mutation_mutation'].sum(dim=1).mean().float()).item()
@@ -190,13 +203,13 @@ def play_games(games, x_players, o_players, test=False):
 def splice_params(params, indices):
   new_params = {}
   for key in params:
-    new_params[key] = params[key].clone()[indices]
+    new_params[key] = params[key][indices]
   return new_params
 
 def concat_params(params1, params2, slc1=slice(0,None), slc2=slice(0,None)):
   new_params = {}
   for key in params1:
-    new_params[key] = torch.cat([params1[key].clone()[slc1], params2[key].clone()[slc2]]).clone()
+    new_params[key] = torch.cat([params1[key][slc1], params2[key][slc2]])
   return new_params
 
 def swizzle_players(players, bs=BATCH_SIZE):
@@ -221,8 +234,10 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
   params = {'input_dna': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
             'bias_dna': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
             'output_dna': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE)}
-  for key in params:
+  for key in list(params.keys()):
     params[key + '_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)
+    meta_shape = tuple(list(params[key].shape) + [13,])
+    params[key + '_meta'] = torch.zeros(meta_shape, dtype=torch.float, device=DEVICE)
   params['mutation_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)
 
   params = params_from_dna(params)
@@ -283,9 +298,9 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(200,1000):
+  for i in range(400,1000):
     init_credits = 1
     size_factor = 8
-    bs = 5000*8//size_factor
+    bs = 2000*8//size_factor
     name = f'run_{i}'
     train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=bs)
