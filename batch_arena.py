@@ -15,6 +15,8 @@ INIT_CREDS = 2
 EMBED_N = 128
 NOISE_SIZE = 9
 MUTATION_PARAMS_SIZE = 50
+META_CORE = 4
+META_SIZE = META_CORE*3 + 1
 
 DEVICE = 'cuda'
 
@@ -40,7 +42,7 @@ def weights_from_dna(dna, shape):
 shapes = {'input': (BOARD_SIZE*4, EMBED_N), 'bias': (EMBED_N,), 'output': (EMBED_N, BOARD_SIZE), 'mutation': (MUTATION_PARAMS_SIZE,)}
 
 def params_from_dna(params, exclude=None):
-  bs = params['input_dna'].shape[0]
+  bs = params['input'].shape[0]
   for key in ['input', 'bias', 'output']:
     if exclude is None:
       params[key] = weights_from_dna(params[key +'_dna'], shapes[key])
@@ -125,8 +127,6 @@ class Players():
     self.credits = credits 
     self.perfect = perfect
 
-  def embryogenesis(self,):
-    self.params = params_from_dna(self.params, exclude=self.perfect)
 
   def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot = F.one_hot(boards.long(), num_classes=3).reshape((boards.shape[0], -1))
@@ -142,21 +142,34 @@ class Players():
     moves = torch.einsum('bji, bj->bi', self.params['output'], embed)
     return moves
   
-  def mate(self, init_credits=INIT_CREDS):
+  def embryogenesis(self):
+    for key in self.params:
+      if 'meta' in key:
+        dna_key = key.replace('_meta', '')
+        orig_size = self.params[dna_key].shape
+        meta_input = self.params[key].reshape((-1, META_SIZE))[:,:META_CORE].reshape((-1, 1, META_CORE))
+        meta_bias = self.params[key].reshape((-1, META_SIZE))[:,META_CORE:META_CORE*2].reshape((-1, META_CORE))
+        meta_output = self.params[key].reshape((-1, META_SIZE))[:,META_CORE*2:META_CORE*3].reshape((-1, META_CORE, 1))
+        meta_cst = self.params[key].reshape((-1, META_SIZE))[:,-1].reshape((-1, 1))
+        x = torch.einsum('bji, bj->bi', meta_input, meta_cst)
+        x = x + meta_bias
+        x = torch.relu(x)
+        x = torch.einsum('bji, bj->bi', meta_output, x)
+        self.params[dna_key][~self.perfect] = x.reshape(orig_size)[~self.perfect]
+
+  def mate(self):
     assert self.credits is not None, "Credits must be set before mating."
     dead = (self.credits < 1).nonzero(as_tuple=True)[0]
+    
     can_mate = torch.argsort(self.credits, descending=True)
-    can_mate = can_mate[self.credits[can_mate] >= init_credits*2]
+    can_mate = can_mate[self.credits[can_mate] >= self.init_credits*2]
     dead = dead[:len(can_mate)]
     assert len(can_mate) >= len(dead)
     self.credits[dead] = self.credits[can_mate[:len(dead)]] // 2
     self.credits[can_mate[:len(dead)]] -= self.credits[can_mate[:len(dead)]] // 2
-
     for key in self.params:
-      if 'mutation' in key:
-        mutation_rates = torch.sigmoid(self.params['mutation_mutation'].sum(dim=1))
-      elif 'meta' in key:
-        mutation_rates = torch.sigmoid(self.params[key.replace('meta', 'mutation')].sum(dim=1))
+      if 'meta' in key:
+        mutation_rates = torch.sigmoid(self.params['mutation'].sum(dim=1))
       else:
         continue
       param = torch.clone(self.params[key])
@@ -164,26 +177,20 @@ class Players():
       unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
       mutation_rate_full = mutation_rates.reshape(unsqueezed_shape).expand(shape)
       mutation = (torch.rand_like(param) < mutation_rate_full).float()
+      mutation2 = (torch.rand_like(param) < mutation_rate_full).float()
       new_param = (1 - mutation) * param + mutation * (torch.zeros_like(param).uniform_(-1,1))
+      new_param2 = (1 - mutation2) * param + mutation2 * (torch.zeros_like(param).uniform_(-1,1))
       self.params[key][dead] = new_param[can_mate[:len(dead)]]
-    
-      if 'meta' in key:
-        dna_key = key.replace('_meta', '')
-        orig_size = self.params[dna_key].shape
-        meta_input = self.params[key].reshape((-1, 13))[:,:4].reshape((-1, 1, 4))
-        meta_bias = self.params[key].reshape((-1, 13))[:,4:8].reshape((-1, 4))
-        meta_output = self.params[key].reshape((-1, 13))[:,8:12].reshape((-1, 4, 1))
-        meta_cst = self.params[key].reshape((-1, 13))[:,12].reshape((-1, 1))
-        x = torch.einsum('bji, bj->bi', meta_input, meta_cst)
-        x = x + meta_bias
-        x = torch.relu(x)
-        x = torch.einsum('bji, bj->bi', meta_output, x)
-        self.params[dna_key][dead] = x.reshape(orig_size)[can_mate[:len(dead)]]
+      self.params[key][can_mate] = new_param2[can_mate]
+    self.embryogenesis()
 
+  @property
+  def init_credits(self):
+    return 1 + 0*torch.sigmoid(self.params['init_credits'].sum(dim=1))
 
 
   def avg_log_mutuation(self):
-    return torch.sigmoid(self.params['mutation_mutation'].sum(dim=1).mean().float()).item()
+    return torch.sigmoid(self.params['mutation'].sum(dim=1).mean().float()).item()
 
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
@@ -218,7 +225,8 @@ def swizzle_players(players, bs=BATCH_SIZE):
   o_players = Players(splice_params(players.params, indices[bs:]), players.credits[indices][bs:], perfect=players.perfect[indices][bs:])
   return x_players, o_players
 
-def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
+def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
+  init_credits = 1
   writer = SummaryWriter(f'runs/{name}')
 
   EMBED_N = embed_n
@@ -227,20 +235,20 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
   perfect_params = pickle.load(open('perfect_dna.pkl', 'rb'))
   perfect_players = Players.from_params(perfect_params, bs=BATCH_SIZE*2, device=DEVICE)
 
-  credits = init_credits * torch.ones((BATCH_SIZE*2,), dtype=torch.float32, device=DEVICE)
+  credits = torch.ones((BATCH_SIZE*2,), dtype=torch.float32, device=DEVICE)
   perfect = torch.zeros((BATCH_SIZE*2,), dtype=torch.bool, device=DEVICE)
   perfect[:BATCH_SIZE*2//4] = 1
 
-  params = {'input_dna': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
-            'bias_dna': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
-            'output_dna': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE)}
+  params = {'input': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*4, EMBED_N), dtype=torch.float, device=DEVICE),
+            'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
+            'output': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE), dtype=torch.float, device=DEVICE),
+            'init_credits': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
+            'mutation': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)}
   for key in list(params.keys()):
-    params[key + '_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)
-    meta_shape = tuple(list(params[key].shape) + [13,])
+    meta_shape = tuple(list(params[key].shape) + [META_SIZE,])
     params[key + '_meta'] = torch.zeros(meta_shape, dtype=torch.float, device=DEVICE)
-  params['mutation_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)
 
-  params = params_from_dna(params)
+  #params = params_from_dna(params)
 
   for key in list(params.keys()):
     if key in perfect_params:
@@ -258,8 +266,6 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
     t0 = time.time()
     games = Games(bs=BATCH_SIZE)
     x_players, o_players = swizzle_players(players, bs=BATCH_SIZE)
-    x_players.embryogenesis()
-    o_players.embryogenesis()
     t1 = time.time()
     play_games(games, x_players, o_players)
     t2 = time.time()
@@ -271,12 +277,13 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
       print(f'Average total moves: {games.total_moves:.2f}, avg credits of X: {x_players.credits.float().mean():.2f}, avg credits of O: {o_players.credits.float().mean():.2f}')
       writer.add_scalar('total_moves', games.total_moves, step)
       writer.add_scalar('avg_log_mutuation', players.avg_log_mutuation(), step)
+      writer.add_scalar('avg_init_credits', players.init_credits.mean(), step)
       writer.add_scalar('draw_rate',(games.winners == PLAYERS.NONE).float().mean(), step)
       writer.add_scalar('perfect_ratio',players.perfect.float().mean(), step)
 
     players = Players(concat_params(x_players.params, o_players.params), torch.cat([x_players.credits, o_players.credits]), torch.cat([x_players.perfect, o_players.perfect]))
     players.credits[players.perfect] = init_credits
-    players.mate(init_credits=init_credits)
+    players.mate()
 
     t3 = time.time()
     if step % 100 == 0:
@@ -291,16 +298,14 @@ def train_run(name='', init_credits=INIT_CREDS, embed_n=EMBED_N, bs=BATCH_SIZE):
       writer.add_scalar('avg_moves_vs_perfect_player', games.total_moves, step)
       writer.add_scalar('loss_rate_vs_perfect_player',(games.winners == PLAYERS.X).float().mean(), step)
       writer.add_scalar('draw_rate_vs_perfect_player',(games.winners == PLAYERS.NONE).float().mean(), step)
-    players.credits += init_credits - players.credits.mean()
+    players.credits += players.init_credits.mean() - players.credits.mean()
 
 
 
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(400,1000):
-    init_credits = 1
-    size_factor = 8
-    bs = 2000*8//size_factor
+  for i in range(1001,2000):
+    bs = 2000
     name = f'run_{i}'
-    train_run(name=name, init_credits=init_credits, embed_n=size_factor*16, bs=bs)
+    train_run(name=name, embed_n=128, bs=bs)
