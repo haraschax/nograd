@@ -12,7 +12,7 @@ from torch.nn import functional as F
 MAX_MOVES = 10
 BATCH_SIZE = 10
 INIT_CREDS = 2
-EMBED_N = 128
+EMBED_N = 512
 NOISE_SIZE = 16
 MUTATION_PARAMS_SIZE = 50
 
@@ -128,12 +128,14 @@ def mate(x_players, o_players, x_winners, o_winners):
         if '_std' in key:
           mutation_sizes = torch.sigmoid(players.params['mutation_size'].sum(dim=1))
           unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
-          mutation_sizes_full = mutation_sizes.reshape(unsqueezed_shape).expand(shape)
+          mutation_rate_full = mutation_sizes.reshape(unsqueezed_shape).expand(shape)
         else:
-          mutation_sizes_full = torch.sigmoid(players.params[key + '_std'])
+          mutation_rate_full = torch.sigmoid((players.params[key + '_std'] - 1)*5)
+        mutation_full = torch.rand_like(mutation_rate_full) < mutation_rate_full
+        mutation_full2 = torch.rand_like(mutation_rate_full) < mutation_rate_full
         other_players.params[key][winners] = param[winners].clone()
-        players.params[key] += mutation_sizes_full * (torch.zeros_like(players.params[key]).uniform_(-1,1))
-        other_players.params[key] += mutation_sizes_full * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))
+        players.params[key] += mutation_full * (torch.zeros_like(players.params[key]).uniform_(-1,1))
+        other_players.params[key] += mutation_full2 * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))
 
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
@@ -233,7 +235,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(100,2000):
-    bs = 10000
+  for i in range(1000,2000):
+    bs = 2000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
