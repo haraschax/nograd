@@ -12,7 +12,7 @@ from torch.nn import functional as F
 MAX_MOVES = 10
 BATCH_SIZE = 10
 INIT_CREDS = 2
-EMBED_N = 512
+EMBED_N = 128
 NOISE_SIZE = 16
 MUTATION_PARAMS_SIZE = 50
 
@@ -125,17 +125,20 @@ def mate(x_players, o_players, x_winners, o_winners):
       for key in players.params:
         param = players.params[key]
         shape = players.params[key].shape
-        if '_std' in key:
-          mutation_sizes = torch.sigmoid(players.params['mutation_size'].sum(dim=1))
-          unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
-          mutation_rate_full = mutation_sizes.reshape(unsqueezed_shape).expand(shape)
-        else:
-          mutation_rate_full = torch.sigmoid((players.params[key + '_std'] - 1)*5)
-        mutation_full = torch.rand_like(mutation_rate_full) < mutation_rate_full
-        mutation_full2 = torch.rand_like(mutation_rate_full) < mutation_rate_full
+
+        mutation_logit = players.params['mutation_size'].sum(dim=1)
+        unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
+        mutation_full_logit = mutation_logit.reshape(unsqueezed_shape).expand(shape)
+        if '_std' not in key:
+          mutation_full_logit = mutation_full_logit +  5 * players.params[key + '_std']
+        mutation_rate_full = torch.sigmoid(mutation_full_logit)
+        mutation_full = torch.rand_like(mutation_rate_full)
+        mutation_full2 = torch.rand_like(mutation_rate_full)
         other_players.params[key][winners] = param[winners].clone()
-        players.params[key] += mutation_full * (torch.zeros_like(players.params[key]).uniform_(-1,1))
-        other_players.params[key] += mutation_full2 * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))
+        #players.params[key][winners] = (1 - mutation_full[winners]) * players.params[key][winners] + mutation_full[winners] * (torch.zeros_like(players.params[key]).uniform_(-1,1))[winners]
+        #other_players.params[key][winners] = (1 - mutation_full2[winners]) * other_players.params[key][winners] + mutation_full2[winners] * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))[winners]
+        players.params[key][winners] += mutation_full[winners] * (torch.zeros_like(players.params[key]).uniform_(-1,1))[winners]
+        other_players.params[key][winners] += mutation_full2[winners] * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))[winners]
 
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
@@ -180,8 +183,6 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   for key in list(params.keys()):
     meta_shape = tuple(list(params[key].shape))
     params[key + '_std'] = torch.zeros(meta_shape, dtype=torch.float, device=DEVICE)
-  players = Players(params)
-
 
   
 
@@ -189,7 +190,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   import time
   import tqdm
   pbar = tqdm.tqdm(range(200000))
-  a_players, b_players = swizzle_players(players, bs=BATCH_SIZE)
+  a_players, b_players = swizzle_players(Players(params), bs=BATCH_SIZE)
 
   for step in pbar:
     t0 = time.time()
@@ -229,13 +230,13 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
       string = f'swizzling took {1000*(t4-t3):.2f}ms, playing took {1000*(t2-t1):.2f}ms, mating took {1000*(t3-t2):.2f}ms'
       pbar.set_description(string)
     if step % 1000 == 0:
-      pickle.dump(players.params, open('organic_dna.pkl', 'wb'))
+      pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
 
 
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(1000,2000):
-    bs = 2000
+  for i in range(0,13000):
+    bs = 10000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
