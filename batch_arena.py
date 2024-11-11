@@ -16,6 +16,14 @@ EMBED_N = 128
 NOISE_SIZE = 16
 MUTATION_PARAMS_SIZE = 50
 
+META_INPUT = 8
+META_OUTPUT = 3
+META_CORE = 32
+META_A = META_INPUT*META_CORE
+META_B = META_CORE*META_OUTPUT
+META_BIAS = META_CORE
+META_SIZE = META_A + META_B + META_BIAS
+
 DEVICE = 'cuda'
 
 
@@ -99,17 +107,42 @@ class Players():
   def reset_state(self):
     self.state = torch.zeros((self.bs, NOISE_SIZE), device=self.device)
 
+  def embryogenesis(self):
+    matrix_A = self.params['embryogenesis'][:, :META_A].reshape((self.bs, META_INPUT, META_CORE))
+    matrix_B = self.params['embryogenesis'][:, META_A:META_A+META_B].reshape((self.bs, META_CORE, META_OUTPUT))
+    bias = self.params['embryogenesis'][:, META_A+META_B:META_A+META_B+META_BIAS]
+
+
+
+    for key in list(self.params.keys()):
+      if 'meta' in key and 'mutation' not in key and 'embryogenesis' not in key:
+
+        #print(key, self.params[key].shape, self.params[key.replace('_meta', '')].shape)
+        #self.params[key.replace('_meta', '')] = self.params[key][:,:,0]
+        #continue
+
+
+        embed = torch.einsum('bji, bnj->bni', matrix_A, self.params[key])
+        embed = embed + bias[:,None,:]
+        embed = torch.relu(embed)
+        embed = torch.einsum('bji, bnj->bni', matrix_B, embed)
+        self.params[key.replace('_meta', '')] = embed[:,:,0]
+        self.params[key + '_mutation'] = embed[:,:,1]
+        self.params[key + '_mutation_size'] = embed[:,:,2]
+
   def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot = F.one_hot(boards.long(), num_classes=3).reshape((boards.shape[0], -1))
     noise = 0.5 * torch.ones((boards.shape[0], NOISE_SIZE), device=boards.device)
     noise = noise.uniform_(0, 1)
 
     inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), self.state, noise], dim=1)
-    embed = torch.einsum('bji, bj->bi', self.params['input'], inputs)
+    matrix_A = self.params['input'].reshape((self.bs, BOARD_SIZE*3 + NOISE_SIZE*2, EMBED_N))
+    matrix_B = self.params['output'].reshape((self.bs,  EMBED_N, BOARD_SIZE + NOISE_SIZE))
+    embed = torch.einsum('bji, bj->bi', matrix_A, inputs)
     embed = embed + self.params['bias']
     embed = torch.relu(embed)
 
-    out = torch.einsum('bji, bj->bi', self.params['output'], embed)# + res_x)
+    out = torch.einsum('bji, bj->bi', matrix_B, embed)
     moves =  out[:,:BOARD_SIZE]
     #self.state = out[:,BOARD_SIZE:]
     return moves
@@ -118,27 +151,50 @@ class Players():
     return torch.sigmoid(self.params['mutation'].sum(dim=1)).mean().float().item()
 
   def avg_log_mutuation_size(self):
-    return torch.sigmoid(self.params['mutation_size'].sum(dim=1)).mean().float().item()
+    return torch.sigmoid(-abs(self.params['embryogenesis_mutation'].sum(dim=1)/10)).mean().float().item()
 
 def mate(x_players, o_players, x_winners, o_winners):
+    x_players.embryogenesis()
+    o_players.embryogenesis()
+    #assert (x_winners != o_winners).all()
     for players, other_players, winners in [(x_players, o_players, x_winners), (o_players, x_players, o_winners)]:
       for key in players.params:
+        if 'meta' not in key and 'mutation' not in key and 'embryogenesis' not in key: continue
+        if 'meta_mutation' in key: continue
+        #if 'meta' in key: continue
+        #if 'embryogenesis' in key: continue
         param = players.params[key]
         shape = players.params[key].shape
 
-        mutation_logit = players.params['mutation_size'].sum(dim=1)
+
+        if 'meta' in key:
+          mutation_logit = -abs(players.params[key+'_mutation'][:,:,None])
+        elif len(shape) == 2:
+          mutation_logit = -abs(players.params['embryogenesis_mutation']).sum(dim=1)[:,None]/10
+        else:
+          mutation_logit = -abs(players.params['embryogenesis_mutation']).sum(dim=1)[:,None,None]/10
+
         unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
-        mutation_full_logit = mutation_logit.reshape(unsqueezed_shape).expand(shape)
-        if '_std' not in key:
-          mutation_full_logit = mutation_full_logit +  5 * players.params[key + '_std']
-        mutation_rate_full = torch.sigmoid(mutation_full_logit)
-        mutation_full = torch.rand_like(mutation_rate_full)
-        mutation_full2 = torch.rand_like(mutation_rate_full)
+         # mutation_full_logit = mutation_logit.reshape(unsqueezed_shape).expand(shape)
+        #if '_std' not in key:
+        #  mutation_full_logit = mutation_full_logit +  5 * players.params[key + '_std']
+        mutation_rate_full = torch.sigmoid(mutation_logit)
+        #print(shape, mutation_rate_full.shape)
+        #mutation_full = (mutation_rate_full < torch.rand_like(mutation_rate_full)).float()
+        mutation_full = (mutation_rate_full < torch.rand(shape, device=param.device)).float()
+        mutation_full2 = (mutation_rate_full < torch.rand(shape, device=param.device)).float()
+
+        #mutation_full = mutation_rate_full
+        #mutation_full2 = mutation_rate_full
+
         other_players.params[key][winners] = param[winners].clone()
         #players.params[key][winners] = (1 - mutation_full[winners]) * players.params[key][winners] + mutation_full[winners] * (torch.zeros_like(players.params[key]).uniform_(-1,1))[winners]
-        #other_players.params[key][winners] = (1 - mutation_full2[winners]) * other_players.params[key][winners] + mutation_full2[winners] * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))[winners]
-        players.params[key][winners] += mutation_full[winners] * (torch.zeros_like(players.params[key]).uniform_(-1,1))[winners]
-        other_players.params[key][winners] += mutation_full2[winners] * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))[winners]
+        players.params[key][winners] = (mutation_full * players.params[key] + (mutation_full * (torch.zeros_like(players.params[key]).uniform_(-1,1))))[winners]
+        other_players.params[key][winners] = (mutation_full2 * players.params[key] + (mutation_full2 * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))))[winners]
+        #players.params[key][winners] += mutation_full[winners] * (torch.zeros_like(players.params[key]).uniform_(-1,1))[winners]
+        #other_players.params[key][winners] += mutation_full2[winners] * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))[winners]
+    x_players.embryogenesis()
+    o_players.embryogenesis()
 
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
@@ -175,15 +231,15 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   EMBED_N = embed_n
   BATCH_SIZE = bs
 
-  params = {'input': torch.zeros((BATCH_SIZE*2, BOARD_SIZE*3 + NOISE_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
+  params = {'input': torch.zeros((BATCH_SIZE*2, (BOARD_SIZE*3 + NOISE_SIZE*2) * EMBED_N), dtype=torch.float, device=DEVICE),
             'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
-            'output': torch.zeros((BATCH_SIZE*2, EMBED_N, BOARD_SIZE + NOISE_SIZE), dtype=torch.float, device=DEVICE),
-            'mutation': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE),
-            'mutation_size': torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE)}
+            'output': torch.zeros((BATCH_SIZE*2, EMBED_N *(BOARD_SIZE + NOISE_SIZE)), dtype=torch.float, device=DEVICE)}
   for key in list(params.keys()):
-    meta_shape = tuple(list(params[key].shape))
-    params[key + '_std'] = torch.zeros(meta_shape, dtype=torch.float, device=DEVICE)
-
+    meta_shape = tuple(list(params[key].shape) + [META_INPUT])
+    params[key + '_meta'] = torch.zeros(meta_shape, dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['embryogenesis'] = torch.zeros((BATCH_SIZE*2, META_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
+  params['embryogenesis_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
+  
   
 
 
@@ -210,7 +266,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
         play_games(games, b_players, a_players)
         a_wins += (games.winners == PLAYERS.O)
         b_wins += (games.winners == PLAYERS.X)
-    mut_rate = a_players.avg_log_mutuation()
+    #mut_rate = a_players.avg_log_mutuation()
     mut_size = a_players.avg_log_mutuation_size()
     t2 = time.time()
     mate(a_players, b_players, a_wins > b_wins, a_wins < b_wins)
@@ -220,9 +276,9 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
     if step % 100 == 0:
       writer.add_scalar('total_moves_val', games.total_moves, step)
 
-      print(f'Average total moves: {games.total_moves:.2f}')
+      print(f'Average total moves: {games.total_moves:.2f}, Average mutuation rate: {mut_size:.1e}')
       writer.add_scalar('total_moves', games.total_moves, step)
-      writer.add_scalar('avg_log_mutuation', mut_rate, step)
+      #writer.add_scalar('avg_log_mutuation', mut_rate, step)
       writer.add_scalar('avg_log_mutuation_size', mut_size, step)
       writer.add_scalar('draw_rate',(a_wins == b_wins).float().mean(), step)
 
@@ -236,7 +292,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(0,13000):
-    bs = 10000
+  for i in range(2000,13000):
+    bs = 1000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
