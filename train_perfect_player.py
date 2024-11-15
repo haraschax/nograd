@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
-EMBED_N = 128
+EMBED_N = 512
 ###### GET OPTIMAL MOVES ######
 
 def is_winner(board, player):
@@ -91,7 +91,7 @@ class TicTacToeDataset(Dataset):
         board = torch.tensor(board).long()
         board_flat_onehot = torch.nn.functional.one_hot(board.flatten(), num_classes=3).float()
         
-        board = torch.cat([board_flat_onehot.flatten(), 0.5*torch.ones((9,))])
+        board = torch.cat([board_flat_onehot.flatten(), 0.5*torch.ones((32,))])
         move = move[0] * 3 + move[1]  # Convert move to single integer
         return board, move
 
@@ -99,7 +99,7 @@ class TicTacToeDataset(Dataset):
 class TicTacToeNN(nn.Module):
     def __init__(self):
         super(TicTacToeNN, self).__init__()
-        self.fc1 = nn.Linear(9*4, EMBED_N)
+        self.fc1 = nn.Linear(59, EMBED_N)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(EMBED_N, 9, bias=False)
         
@@ -139,9 +139,9 @@ names = ['input', 'bias', 'output']
 save_params = {}
 for name_, param in zip(names, params):
   if len(param.data.shape) == 2:
-    save_params[name_] = param.data.T[None,:]
+    save_params[name_] = param.data.T.reshape((1,-1))
   else:
-    save_params[name_] = param.data[None,:]
+    save_params[name_] = param.data[None,:].reshape((1,-1))
 
 print('Saving weights...')
 with open('perfect_dna.pkl', 'wb') as f:
