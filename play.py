@@ -62,9 +62,11 @@ if __name__ == '__main__':
 
   if args.perfect:
     params = pickle.load(open('perfect_dna.pkl', 'rb'))
+    players = Players.from_params(params, device=device)
+    players.perfect[:] = True
   else:
     params = pickle.load(open('organic_dna.pkl', 'rb'))
-  players = Players.from_params(params, device=device)
+    players = Players.from_params(params, device=device)
   print(players.params['input'].shape)
 
   while not games.game_over[0]:
@@ -80,10 +82,10 @@ if __name__ == '__main__':
         move = torch.zeros((3,3), device=device)
         
         move[clicked_row, clicked_col] = 1
-        games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X)
+        games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X, test=True)
         if not games.game_over[0]:
           move = players.play(games.boards, test=True)
-          games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.O)
+          games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.O, test=True)
 
     draw_figures(games.boards.cpu().reshape((BOARD_ROWS,BOARD_COLS)).numpy())
     pygame.display.update()

@@ -2,6 +2,7 @@
 import pickle
 import torch
 import math
+import numpy as np
 torch.set_grad_enabled(False)
 import torch.nn.functional as F
 from helpers import PLAYERS, next_player, BOARD_SIZE
@@ -12,7 +13,7 @@ from torch.nn import functional as F
 MAX_MOVES = 10
 BATCH_SIZE = 10
 INIT_CREDS = 2
-EMBED_N = 128
+EMBED_N = 512
 NOISE_SIZE = 16
 MUTATION_PARAMS_SIZE = 50
 
@@ -39,15 +40,23 @@ class Games():
     self.device = device
     self.boards = torch.zeros((self.bs, BOARD_SIZE), dtype=torch.int8, device=self.device)
     self.winners = torch.zeros((self.bs,), dtype=torch.int8, device=self.device)
+    self.illegal_movers = torch.zeros((self.bs,), dtype=torch.int8, device=self.device)
     self.update_game_over()
 
   def update(self, moves, player, test=False, player_dict=None):
     assert len(moves) == self.bs
     assert len(moves) == self.boards.shape[0]
     move_idxs = torch.argmax(moves, dim=1, keepdim=True)
-    
-    illegal_movers = self.boards.gather(1, move_idxs) != PLAYERS.NONE
-    self.winners[(illegal_movers[:,0]) & (self.game_over == 0)] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
+
+    #if not test:
+    #  random_moves = torch.rand(size=move_idxs.shape, device=moves.device) < 0.01
+    #  move_idxs[random_moves] = torch.randint(0, 9, (self.bs, 1), device=self.device)[random_moves]
+    #print(self.illegal_movers[:10], self.winners[:10])
+    assert (self.illegal_movers[self.game_over == 0] == PLAYERS.NONE).all()
+
+    illegal_moves = (self.boards.gather(1, move_idxs) != PLAYERS.NONE).reshape(-1)
+    self.illegal_movers[(self.game_over == 0) & illegal_moves] = PLAYERS.O if player == PLAYERS.O else PLAYERS.X
+    self.winners[illegal_moves & (self.game_over == 0)] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
     self.update_game_over()
 
     move_scattered = torch.zeros_like(self.boards.to(dtype=torch.bool))
@@ -85,6 +94,10 @@ class Games():
   def total_moves(self):
     return (self.boards != PLAYERS.NONE).sum(dim=1).float().mean()
 
+  @property
+  def _total_moves(self):
+    return (self.boards != PLAYERS.NONE).sum(dim=1).float()
+
   def update_game_over(self):
     self.game_over = (self.winners != PLAYERS.NONE) | ((self.boards != PLAYERS.NONE).sum(dim=1) == BOARD_SIZE)
 
@@ -101,11 +114,12 @@ class Players():
   def __init__(self, params):
     self.bs = params['input'].shape[0]
     self.device = params['input'].device
+    self.perfect = torch.zeros(params['input'].shape[0], device=self.device, dtype=torch.bool)
     self.params = params
     self.reset_state()
 
   def reset_state(self):
-    self.state = torch.zeros((self.bs, NOISE_SIZE), device=self.device)
+    self.state = 0.5 * torch.ones((self.bs, NOISE_SIZE), device=self.device)
 
   def embryogenesis(self):
     matrix_A = self.params['embryogenesis'][:, :META_A].reshape((self.bs, META_INPUT, META_CORE))
@@ -133,17 +147,41 @@ class Players():
   def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot = F.one_hot(boards.long(), num_classes=3).reshape((boards.shape[0], -1))
     noise = 0.5 * torch.ones((boards.shape[0], NOISE_SIZE), device=boards.device)
-    noise = noise.uniform_(0, 1)
+    noise[~self.perfect,:8] = noise[~self.perfect,:8] * current_player * 2 - 1.5 #noise.uniform_(0, 1)[~self.perfect]
+    noise[~self.perfect,8:] = noise[~self.perfect,8:].uniform_(0, 1)
 
     inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), self.state, noise], dim=1)
     matrix_A = self.params['input'].reshape((self.bs, BOARD_SIZE*3 + NOISE_SIZE*2, EMBED_N))
-    matrix_B = self.params['output'].reshape((self.bs,  EMBED_N, BOARD_SIZE + NOISE_SIZE))
+    matrix_B = self.params['output'].reshape((self.bs,  EMBED_N, BOARD_SIZE))
+
     embed = torch.einsum('bji, bj->bi', matrix_A, inputs)
     embed = embed + self.params['bias']
     embed = torch.relu(embed)
-
     out = torch.einsum('bji, bj->bi', matrix_B, embed)
+
+    if 'input_0' in self.params:
+      for i in range(9):
+      #  matrix = self.params[f'inter_block_{i}'].reshape((self.bs, EMBED_N, EMBED_N))
+      #  x = torch.einsum('bji, bj->bi', matrix, embed)
+      #  x += self.params[f'inter_bias_{i}']
+      #  x = torch.relu(x)
+      #  embed += x
+        #noise[~self.perfect,8:] = noise[~self.perfect,8:].uniform_(0, 1)
+        inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), self.state, noise], dim=1)
+        matrix_A = self.params[f'input_{i}'].reshape((self.bs, BOARD_SIZE*3 + NOISE_SIZE*2, EMBED_N))
+        matrix_B = self.params[f'output_{i}'].reshape((self.bs,  EMBED_N, BOARD_SIZE))
+
+        embed = torch.einsum('bji, bj->bi', matrix_A, inputs)
+        embed = embed + self.params[f'bias_{i}']
+        embed = torch.relu(embed)
+        out[:,i] = torch.einsum('bji, bj->bi', matrix_B, embed).sum(dim=1)
+
     moves =  out[:,:BOARD_SIZE]
+    #moves[boards != PLAYERS.NONE] = -1e9
+    if not test:
+      moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.05).float()
+      #print( 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.5).float())
+      #print((moves.reshape((-1,)) > 1e4).sum() / moves.reshape((-1,)).shape[0])
     #self.state = out[:,BOARD_SIZE:]
     return moves
 
@@ -151,50 +189,55 @@ class Players():
     return torch.sigmoid(self.params['mutation'].sum(dim=1)).mean().float().item()
 
   def avg_log_mutuation_size(self):
-    return torch.sigmoid(-abs(self.params['embryogenesis_mutation'].sum(dim=1)/10)).mean().float().item()
+    return torch.sigmoid((self.params['embryogenesis_mutation'].sum(dim=1))).mean().float().item()
 
 def mate(x_players, o_players, x_winners, o_winners):
-    x_players.embryogenesis()
-    o_players.embryogenesis()
+    #x_players.embryogenesis()
+    #o_players.embryogenesis()
     #assert (x_winners != o_winners).all()
+    #x_winners[x_players.perfect] = False
+    #o_winners[o_players.perfect] = False
     for players, other_players, winners in [(x_players, o_players, x_winners), (o_players, x_players, o_winners)]:
       for key in players.params:
-        if 'meta' not in key and 'mutation' not in key and 'embryogenesis' not in key: continue
-        if 'meta_mutation' in key: continue
+        #if 'meta' not in key and 'mutation' not in key and 'embryogenesis' not in key: continue
+        #if 'meta_mutation' in key: continue
         #if 'meta' in key: continue
         #if 'embryogenesis' in key: continue
         param = players.params[key]
         shape = players.params[key].shape
 
 
-        if 'meta' in key:
-          mutation_logit = -abs(players.params[key+'_mutation'][:,:,None])
+        if f'{key}_mutation' in list(players.params.keys()):
+          mutation_logit = players.params[key+'_mutation'].sum(dim=2) +  (players.params['embryogenesis_mutation']).sum(dim=1)[:,None]
         elif len(shape) == 2:
-          mutation_logit = -abs(players.params['embryogenesis_mutation']).sum(dim=1)[:,None]/10
+          mutation_logit = (players.params['embryogenesis_mutation']).sum(dim=1)[:,None]
         else:
-          mutation_logit = -abs(players.params['embryogenesis_mutation']).sum(dim=1)[:,None,None]/10
+          mutation_logit = (players.params['embryogenesis_mutation']).sum(dim=1)[:,None,None]
 
         unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
          # mutation_full_logit = mutation_logit.reshape(unsqueezed_shape).expand(shape)
         #if '_std' not in key:
         #  mutation_full_logit = mutation_full_logit +  5 * players.params[key + '_std']
         mutation_rate_full = torch.sigmoid(mutation_logit)
+        #mutation_rate_full = torch.ones_like(param) * 1e-4
         #print(shape, mutation_rate_full.shape)
         #mutation_full = (mutation_rate_full < torch.rand_like(mutation_rate_full)).float()
-        mutation_full = (mutation_rate_full < torch.rand(shape, device=param.device)).float()
-        mutation_full2 = (mutation_rate_full < torch.rand(shape, device=param.device)).float()
+        #print(mutation_rate_full)
+        #mutation_full = (mutation_rate_full > torch.rand(shape, device=param.device)).float()
+        mutation_full2 = (mutation_rate_full > torch.rand(shape, device=param.device)).float()
+        #print(mutation_full[0].sum()/mutation_full.shape[1])
 
         #mutation_full = mutation_rate_full
         #mutation_full2 = mutation_rate_full
 
         other_players.params[key][winners] = param[winners].clone()
         #players.params[key][winners] = (1 - mutation_full[winners]) * players.params[key][winners] + mutation_full[winners] * (torch.zeros_like(players.params[key]).uniform_(-1,1))[winners]
-        players.params[key][winners] = (mutation_full * players.params[key] + (mutation_full * (torch.zeros_like(players.params[key]).uniform_(-1,1))))[winners]
-        other_players.params[key][winners] = (mutation_full2 * players.params[key] + (mutation_full2 * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))))[winners]
+        #players.params[key][winners] = ((1 -  mutation_full) * players.params[key] + mutation_full * (torch.zeros_like(players.params[key]).uniform_(-1,1)))[winners]
+        other_players.params[key][winners] = ((1 - mutation_full2) * other_players.params[key] + mutation_full2 * (torch.zeros_like(other_players.params[key]).uniform_(-1,1)))[winners]
         #players.params[key][winners] += mutation_full[winners] * (torch.zeros_like(players.params[key]).uniform_(-1,1))[winners]
         #other_players.params[key][winners] += mutation_full2[winners] * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))[winners]
-    x_players.embryogenesis()
-    o_players.embryogenesis()
+    #x_players.embryogenesis()
+    #o_players.embryogenesis()
 
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
@@ -222,7 +265,9 @@ def concat_params(params1, params2, slc1=slice(0,None), slc2=slice(0,None)):
 def swizzle_players(players, bs=BATCH_SIZE):
   indices = torch.randperm(bs*2)
   x_players = Players(splice_params(players.params, indices[:bs]))
+  x_players.perfect = players.perfect[indices[:bs]]
   o_players = Players(splice_params(players.params, indices[bs:]))
+  o_players.perfect = players.perfect[indices[bs:]]
   return x_players, o_players
 
 def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
@@ -233,20 +278,38 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
 
   params = {'input': torch.zeros((BATCH_SIZE*2, (BOARD_SIZE*3 + NOISE_SIZE*2) * EMBED_N), dtype=torch.float, device=DEVICE),
             'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
-            'output': torch.zeros((BATCH_SIZE*2, EMBED_N *(BOARD_SIZE + NOISE_SIZE)), dtype=torch.float, device=DEVICE)}
-  for key in list(params.keys()):
-    meta_shape = tuple(list(params[key].shape) + [META_INPUT])
-    params[key + '_meta'] = torch.zeros(meta_shape, dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-  params['embryogenesis'] = torch.zeros((BATCH_SIZE*2, META_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
+            'output': torch.zeros((BATCH_SIZE*2, EMBED_N *(BOARD_SIZE)), dtype=torch.float, device=DEVICE)}
+  #for i in range(9):
+  #  params[f'input_{i}'] = torch.zeros((BATCH_SIZE*2, (BOARD_SIZE*3 + NOISE_SIZE*2) * EMBED_N), dtype=torch.float, device=DEVICE)
+  #  params[f'bias_{i}'] = torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE)
+  #  params[f'output_{i}'] = torch.zeros((BATCH_SIZE*2, EMBED_N *(BOARD_SIZE)), dtype=torch.float, device=DEVICE)
+    #params[f'inter_block_{i}'] = torch.zeros((BATCH_SIZE*2, EMBED_N, EMBED_N), dtype=torch.float, device=DEVICE)
+    #params[f'inter_bias_{i}'] = torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE)
+  #for key in list(params.keys()):
+  # params[key + '_mutation'] = torch.zeros(list(params[key].shape) + [10,], dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+
+  #  meta_shape = tuple(list(params[key].shape) + [META_INPUT])
+  #  params[key + '_meta'] = torch.zeros(meta_shape, dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  #params['embryogenesis'] = torch.zeros((BATCH_SIZE*2, META_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
   params['embryogenesis_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
-  
-  
+    
+  perfect_params = pickle.load(open('perfect_dna.pkl', 'rb'))
+  max_param = max([abs(perfect_params[key]).max() for key in perfect_params])
+  perfect_players = Players.from_params(perfect_params, bs=BATCH_SIZE, device=DEVICE)
+  perfect_players.perfect = torch.ones(BATCH_SIZE, device=DEVICE, dtype=torch.bool)
+
+  PERFECT_AMOUNT = BATCH_SIZE//10
+  for key in perfect_params:
+    params[key][:PERFECT_AMOUNT] = torch.cat([perfect_params[key] for _ in range(PERFECT_AMOUNT)], dim=0)/max_param
+    params[key][:PERFECT_AMOUNT] += torch.randn_like(params[key][:PERFECT_AMOUNT]) * 1e-1
+  players = Players(params)
+  #players.perfect[:PERFECT_AMOUNT] = True
 
 
   import time
   import tqdm
   pbar = tqdm.tqdm(range(200000))
-  a_players, b_players = swizzle_players(Players(params), bs=BATCH_SIZE)
+  a_players, b_players = swizzle_players(players, bs=BATCH_SIZE)
 
   for step in pbar:
     t0 = time.time()
@@ -271,10 +334,17 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
     t2 = time.time()
     mate(a_players, b_players, a_wins > b_wins, a_wins < b_wins)
     t3 = time.time()
-    a_players, b_players = swizzle_players(Players(concat_params(a_players.params, b_players.params)), bs=BATCH_SIZE)
+    concat_players = Players(concat_params(a_players.params, b_players.params))
+    concat_players.perfect = torch.cat([a_players.perfect, b_players.perfect])
+    a_players, b_players = swizzle_players(concat_players, bs=BATCH_SIZE)
     t4 = time.time()
     if step % 100 == 0:
       writer.add_scalar('total_moves_val', games.total_moves, step)
+      assert ((games.illegal_movers != games.winners) | (games._total_moves == 9)).all()
+      writer.add_scalar('o_illegal_move_rate', (games.illegal_movers == PLAYERS.O).sum()/BATCH_SIZE, step)
+      writer.add_scalar('x_illegal_move_rate', (games.illegal_movers == PLAYERS.X).sum()/BATCH_SIZE, step)
+      writer.add_scalar('o_win_rate', ((games.winners == PLAYERS.O) & (games.illegal_movers != PLAYERS.X)).sum()/BATCH_SIZE, step)
+      writer.add_scalar('x_win_rate', ((games.winners == PLAYERS.X) & (games.illegal_movers != PLAYERS.O)).sum()/BATCH_SIZE, step)
 
       print(f'Average total moves: {games.total_moves:.2f}, Average mutuation rate: {mut_size:.1e}')
       writer.add_scalar('total_moves', games.total_moves, step)
@@ -286,13 +356,23 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
       string = f'swizzling took {1000*(t4-t3):.2f}ms, playing took {1000*(t2-t1):.2f}ms, mating took {1000*(t3-t2):.2f}ms'
       pbar.set_description(string)
     if step % 1000 == 0:
+      print('Saving...')
+      print(a_players.params['input'].shape)
       pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
 
+      a_games = Games(bs=BATCH_SIZE, device=DEVICE)
+      play_games(a_games, a_players, perfect_players, test=True)
+      b_games = Games(bs=BATCH_SIZE, device=DEVICE)
+      play_games(b_games, perfect_players, b_players, test=True)
+      
+      perfect_total_moves = (a_games.total_moves + b_games.total_moves)/2
+      print(f'Vs perfect player avg total moves: {perfect_total_moves:.2f}')
+      writer.add_scalar('avg_moves_vs_perfect_player', perfect_total_moves, step)
 
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(2000,13000):
-    bs = 1000
+  for i in range(20,1000):
+    bs = 10000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
