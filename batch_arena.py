@@ -12,22 +12,46 @@ from torch.nn import functional as F
 
 MAX_MOVES = 10
 BATCH_SIZE = 10
-INIT_CREDS = 2
+INIT_CREDS = 1
 EMBED_N = 512
 NOISE_SIZE = 16
 MUTATION_PARAMS_SIZE = 50
+INPUT_DIM = (BOARD_SIZE*3 + NOISE_SIZE*2) * EMBED_N
+OUTPUT_DIM = EMBED_N * BOARD_SIZE
+BIAS_DIM = EMBED_N
+RUN_DIM = INPUT_DIM + OUTPUT_DIM + BIAS_DIM
 
-META_INPUT = 8
-META_OUTPUT = 3
-META_CORE = 32
+GENE_N = 512
+META_CORE = 64
+META_INPUT = META_CORE
+META_OUTPUT = META_CORE
 META_A = META_INPUT*META_CORE
-META_B = META_CORE*META_OUTPUT
+META_B = META_CORE*META_CORE*3
 META_BIAS = META_CORE
-META_SIZE = META_A + META_B + META_BIAS
+META_C = META_CORE*META_OUTPUT
+META_BIAS2 = META_CORE*3
+META_SIZE = META_A + META_B + META_BIAS + META_C + META_BIAS2
+
+DNA_SIZE = GENE_N * META_CORE
+
+print(DNA_SIZE, META_SIZE)
+print(GENE_N * META_OUTPUT, RUN_DIM)
+
+#assert DNA_SIZE > META_SIZE
+#assert GENE_N * META_OUTPUT > RUN_DIM + MUTATION_PARAMS_SIZE
 
 DEVICE = 'cuda'
 
+def sinusoidal_positional_encoding(seq_length, embedding_dim):
+    position = torch.arange(seq_length, dtype=torch.float).unsqueeze(1)
 
+    div_term = torch.exp(torch.arange(0, embedding_dim, 2).float() * (-math.log(10000.0) / embedding_dim))
+
+    pos_enc = torch.zeros(seq_length, embedding_dim)
+    pos_enc[:, 0::2] = torch.sin(position * div_term)  # Even indices
+    pos_enc[:, 1::2] = torch.cos(position * div_term)  # Odd indices
+
+    return pos_enc
 
 def check_winner(board, conv_layer):
     board_tensor = board.float().unsqueeze(1)
@@ -117,32 +141,65 @@ class Players():
     self.perfect = torch.zeros(params['input'].shape[0], device=self.device, dtype=torch.bool)
     self.params = params
     self.reset_state()
+    self.mutation_rate = torch.nan*torch.zeros((self.bs,), device=self.device)
 
   def reset_state(self):
     self.state = 0.5 * torch.ones((self.bs, NOISE_SIZE), device=self.device)
 
   def embryogenesis(self):
-    matrix_A = self.params['embryogenesis'][:, :META_A].reshape((self.bs, META_INPUT, META_CORE))
-    matrix_B = self.params['embryogenesis'][:, META_A:META_A+META_B].reshape((self.bs, META_CORE, META_OUTPUT))
-    bias = self.params['embryogenesis'][:, META_A+META_B:META_A+META_B+META_BIAS]
+    new_params = {}
+    matrix_A = self.params['dna2'][:, :META_A].reshape((self.bs, META_INPUT, META_CORE))
+    matrix_B = self.params['dna2'][:, META_A:META_A+META_B].reshape((self.bs, META_CORE, META_CORE*3))
+    bias = self.params['dna2'][:, META_A+META_B:META_A+META_B+META_BIAS]
 
+    matrix_C = self.params['dna2'][:, META_A+META_B+META_BIAS:META_A+META_B+META_BIAS+META_C].reshape((self.bs, META_CORE, META_OUTPUT))
+    bias2 = self.params['dna2'][:, META_A+META_B+META_BIAS+META_C:META_A+META_B+META_BIAS+META_C+META_BIAS2]
 
+    dna_by_genes =  self.params['dna'].reshape(self.bs, -1, META_INPUT)
+    #dna_w_noise = torch.cat([dna_by_genes, torch.zeros_like(dna_by_genes).uniform_(-1,1)], dim=2)
+    #print(dna_w_noise.shape)
+    #pos_enc = sinusoidal_positional_encoding(dna_by_genes.shape[1], dna_by_genes.shape[2])
+    #print(pos_enc)
+    #dna_by_genes = dna_by_genes + pos_enc[None,:,:].to(device=dna_by_genes.device)
+    embed = torch.einsum('bji, bnj->bni', matrix_A, dna_by_genes)
+    embed = embed + bias[:,None,:]
+    embed = torch.relu(embed)
 
-    for key in list(self.params.keys()):
-      if 'meta' in key and 'mutation' not in key and 'embryogenesis' not in key:
+    embed = torch.nn.functional.normalize(embed, dim=2)
 
-        #print(key, self.params[key].shape, self.params[key.replace('_meta', '')].shape)
-        #self.params[key.replace('_meta', '')] = self.params[key][:,:,0]
-        #continue
+    qkv = torch.einsum('bji, bnj->bni', matrix_B, embed)
+    qkv = qkv + bias2[:,None,:]
+    q, k, v = qkv.chunk(3, dim=2)
 
+    embed = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+    embed = torch.einsum('bji, bnj->bni', matrix_C, embed)
+    #print(embed.abs().mean())
 
-        embed = torch.einsum('bji, bnj->bni', matrix_A, self.params[key])
-        embed = embed + bias[:,None,:]
-        embed = torch.relu(embed)
-        embed = torch.einsum('bji, bnj->bni', matrix_B, embed)
-        self.params[key.replace('_meta', '')] = embed[:,:,0]
-        self.params[key + '_mutation'] = embed[:,:,1]
-        self.params[key + '_mutation_size'] = embed[:,:,2]
+    unrolled_flat = embed.reshape((self.bs, -1)) + self.params['dna']
+    #unrolled_flat = self.params['dna']
+    #unrolled_flat = torch.nn.functional.normalize(unrolled_flat)
+    #print(unrolled_flat.shape, DNA_SIZE, embed.shape)
+ 
+    #print(unrolled_flat.shape, self.params['dna'].shape, GENE_N*META_INPUT//2)
+    #print(unrolled_flat[:, :GENE_N*META_INPUT//2].abs().mean())
+    #mutation = (torch.rand_like(self.params['dna']) < 1e-3).float()
+    #new_params['dna'] = (1 - mutation) * self.params['dna'] + mutation * torch.zeros_like(self.params['dna']).uniform_(-1, 1)
+    mutation_logit = self.params['dna2'][:, -MUTATION_PARAMS_SIZE:].sum(dim=1)
+    mutation_rate = torch.sigmoid(mutation_logit)[:,None]
+    #print(mutation_rate.mean().float().item())
+    #print(mutation_logit_by_gene[:10,:10])
+    mutation = (torch.rand_like(self.params['dna']) < mutation_rate).float()
+    new_params['dna'] = (1 - mutation) * self.params['dna'] + mutation * torch.zeros_like(self.params['dna']).uniform_(-1, 1)
+    mutation = (torch.rand_like(self.params['dna']) < mutation_rate).float()
+    #new_params['dna2'] = (1 - mutation) * self.params['dna2'] + mutation * torch.zeros_like(self.params['dna2']).uniform_(-1, 1)
+
+    #torch.nn.functional.normalize(self.params['dna'] + unrolled_flat[:, :GENE_N*META_INPUT//2])
+
+    new_params['input'] = unrolled_flat[:, :INPUT_DIM]
+    new_params['output'] = unrolled_flat[:, INPUT_DIM:INPUT_DIM+OUTPUT_DIM]
+    new_params['bias'] = unrolled_flat[:, INPUT_DIM+OUTPUT_DIM:INPUT_DIM+OUTPUT_DIM+BIAS_DIM]
+    return new_params
+
 
   def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot = F.one_hot(boards.long(), num_classes=3).reshape((boards.shape[0], -1))
@@ -159,85 +216,68 @@ class Players():
     embed = torch.relu(embed)
     out = torch.einsum('bji, bj->bi', matrix_B, embed)
 
-    if 'input_0' in self.params:
-      for i in range(9):
-      #  matrix = self.params[f'inter_block_{i}'].reshape((self.bs, EMBED_N, EMBED_N))
-      #  x = torch.einsum('bji, bj->bi', matrix, embed)
-      #  x += self.params[f'inter_bias_{i}']
-      #  x = torch.relu(x)
-      #  embed += x
-        #noise[~self.perfect,8:] = noise[~self.perfect,8:].uniform_(0, 1)
-        inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), self.state, noise], dim=1)
-        matrix_A = self.params[f'input_{i}'].reshape((self.bs, BOARD_SIZE*3 + NOISE_SIZE*2, EMBED_N))
-        matrix_B = self.params[f'output_{i}'].reshape((self.bs,  EMBED_N, BOARD_SIZE))
-
-        embed = torch.einsum('bji, bj->bi', matrix_A, inputs)
-        embed = embed + self.params[f'bias_{i}']
-        embed = torch.relu(embed)
-        out[:,i] = torch.einsum('bji, bj->bi', matrix_B, embed).sum(dim=1)
-
     moves =  out[:,:BOARD_SIZE]
+    moves = torch.nn.functional.normalize(moves, dim=1)
     #moves[boards != PLAYERS.NONE] = -1e9
     if not test:
+      #moves += (torch.rand_like(moves[:,0]) < 0.5)[:,None].float() * torch.rand_like(moves) * .1
       moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.05).float()
       #print( 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.5).float())
       #print((moves.reshape((-1,)) > 1e4).sum() / moves.reshape((-1,)).shape[0])
     #self.state = out[:,BOARD_SIZE:]
     return moves
 
-  def avg_log_mutuation(self):
-    return torch.sigmoid(self.params['mutation'].sum(dim=1)).mean().float().item()
+  def trans_mut(self):
+    return torch.sigmoid(self.params['trans_mutation'].sum(dim=1)).mean().float().item()
 
   def avg_log_mutuation_size(self):
-    return torch.sigmoid((self.params['embryogenesis_mutation'].sum(dim=1))).mean().float().item()
+    return torch.sigmoid((self.params['mutation_mutation'].sum(dim=1))).mean().float().item()
 
-def mate(x_players, o_players, x_winners, o_winners):
-    #x_players.embryogenesis()
-    #o_players.embryogenesis()
-    #assert (x_winners != o_winners).all()
-    #x_winners[x_players.perfect] = False
-    #o_winners[o_players.perfect] = False
-    for players, other_players, winners in [(x_players, o_players, x_winners), (o_players, x_players, o_winners)]:
-      for key in players.params:
-        #if 'meta' not in key and 'mutation' not in key and 'embryogenesis' not in key: continue
-        #if 'meta_mutation' in key: continue
-        #if 'meta' in key: continue
-        #if 'embryogenesis' in key: continue
-        param = players.params[key]
-        shape = players.params[key].shape
+  def mate(self, init_credits=INIT_CREDS):
+    assert self.credits is not None, "Credits must be set before mating."
+    # Clamp mutation rate to prevent getting stuck
 
+    dead = (self.credits < 1).nonzero(as_tuple=True)[0]
+    can_mate = torch.argsort(self.credits, descending=True)
+    can_mate = can_mate[self.credits[can_mate] >= init_credits*2]
+    dead = dead[:len(can_mate)]
+    assert len(can_mate) >= len(dead)
+    self.credits[dead] = self.credits[can_mate[:len(dead)]] // 2
+    self.credits[can_mate[:len(dead)]] -= self.credits[can_mate[:len(dead)]] // 2
+    
+    '''
+    indices = torch.randperm(len(can_mate))
+    trans_mut_logit = self.params['trans_mutation'].sum(dim=1)[can_mate]
+    trans_mut_rates = torch.torch.sigmoid(trans_mut_logit)/10
+    #trans_mut_rates[:] = 0.0
+    mixed_params = {}
+    for key in self.params:
+      param = torch.clone(self.params[key])
+      pre_mixed_params = param[can_mate]
+      if 'mutation' not in key and False:
+        mix_mutation = (torch.rand_like(pre_mixed_params) > trans_mut_rates[:,None]).float()
+        mixed_params[key] = pre_mixed_params  * mix_mutation + pre_mixed_params[indices] * (1 - mix_mutation)
+      else:
+        mixed_params[key] = pre_mixed_params
 
-        if f'{key}_mutation' in list(players.params.keys()):
-          mutation_logit = players.params[key+'_mutation'].sum(dim=2) +  (players.params['embryogenesis_mutation']).sum(dim=1)[:,None]
-        elif len(shape) == 2:
-          mutation_logit = (players.params['embryogenesis_mutation']).sum(dim=1)[:,None]
-        else:
-          mutation_logit = (players.params['embryogenesis_mutation']).sum(dim=1)[:,None,None]
+    #new_params = self.embryogenesis()
+    for key in self.params:
+      if 'mutation' in key:
+        mutation_logit = self.params['mutation_mutation'].sum(dim=1)
+      else:
+        mutation_logit = self.params[f'{key}_mutation'].sum(dim=1)
+      mutation_rate = torch.sigmoid(mutation_logit)[can_mate,None]
+      param = torch.clone(mixed_params[key])
+      mutation = (torch.rand_like(param) < mutation_rate).float()
+      param = (1 - mutation) * param + mutation * torch.zeros_like(param).uniform_(-1, 1)
+      #param = param + mutation_rate * torch.zeros_like(param).uniform_(-1, 1)
+      self.params[key][dead] = param[:len(dead)]
+    '''
+    new_params = self.embryogenesis()
+    for key in self.params:
+      if 'dna' not in key:
+        self.params[key][dead] = new_params[key][can_mate][:len(dead)]
 
-        unsqueezed_shape = (-1,) + tuple(1 for _ in range(len(shape)-1))
-         # mutation_full_logit = mutation_logit.reshape(unsqueezed_shape).expand(shape)
-        #if '_std' not in key:
-        #  mutation_full_logit = mutation_full_logit +  5 * players.params[key + '_std']
-        mutation_rate_full = torch.sigmoid(mutation_logit)
-        #mutation_rate_full = torch.ones_like(param) * 1e-4
-        #print(shape, mutation_rate_full.shape)
-        #mutation_full = (mutation_rate_full < torch.rand_like(mutation_rate_full)).float()
-        #print(mutation_rate_full)
-        #mutation_full = (mutation_rate_full > torch.rand(shape, device=param.device)).float()
-        mutation_full2 = (mutation_rate_full > torch.rand(shape, device=param.device)).float()
-        #print(mutation_full[0].sum()/mutation_full.shape[1])
-
-        #mutation_full = mutation_rate_full
-        #mutation_full2 = mutation_rate_full
-
-        other_players.params[key][winners] = param[winners].clone()
-        #players.params[key][winners] = (1 - mutation_full[winners]) * players.params[key][winners] + mutation_full[winners] * (torch.zeros_like(players.params[key]).uniform_(-1,1))[winners]
-        #players.params[key][winners] = ((1 -  mutation_full) * players.params[key] + mutation_full * (torch.zeros_like(players.params[key]).uniform_(-1,1)))[winners]
-        other_players.params[key][winners] = ((1 - mutation_full2) * other_players.params[key] + mutation_full2 * (torch.zeros_like(other_players.params[key]).uniform_(-1,1)))[winners]
-        #players.params[key][winners] += mutation_full[winners] * (torch.zeros_like(players.params[key]).uniform_(-1,1))[winners]
-        #other_players.params[key][winners] += mutation_full2[winners] * (torch.zeros_like(other_players.params[key]).uniform_(-1,1))[winners]
-    #x_players.embryogenesis()
-    #o_players.embryogenesis()
 
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
@@ -249,6 +289,10 @@ def play_games(games, x_players, o_players, test=False):
     if torch.all(games.game_over):
       break
     current_player = next_player(current_player)
+  if not test:
+    for player in player_dict:
+      player_dict[player].credits[games.winners == player] += 1.0
+      player_dict[player].credits[games.losers == player] -= 1.0
 
 def splice_params(params, indices):
   new_params = {}
@@ -265,9 +309,9 @@ def concat_params(params1, params2, slc1=slice(0,None), slc2=slice(0,None)):
 def swizzle_players(players, bs=BATCH_SIZE):
   indices = torch.randperm(bs*2)
   x_players = Players(splice_params(players.params, indices[:bs]))
-  x_players.perfect = players.perfect[indices[:bs]]
+  x_players.credits = players.credits[indices[:bs]]
   o_players = Players(splice_params(players.params, indices[bs:]))
-  o_players.perfect = players.perfect[indices[bs:]]
+  o_players.credits = players.credits[indices[bs:]]
   return x_players, o_players
 
 def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
@@ -276,9 +320,15 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   EMBED_N = embed_n
   BATCH_SIZE = bs
 
-  params = {'input': torch.zeros((BATCH_SIZE*2, (BOARD_SIZE*3 + NOISE_SIZE*2) * EMBED_N), dtype=torch.float, device=DEVICE),
-            'bias': torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE),
-            'output': torch.zeros((BATCH_SIZE*2, EMBED_N *(BOARD_SIZE)), dtype=torch.float, device=DEVICE)}
+  params = {'input': torch.zeros((BATCH_SIZE*2, INPUT_DIM), dtype=torch.float, device=DEVICE),
+            'bias': torch.zeros((BATCH_SIZE*2, BIAS_DIM), dtype=torch.float, device=DEVICE),
+            'output': torch.zeros((BATCH_SIZE*2, OUTPUT_DIM), dtype=torch.float, device=DEVICE)}
+  params['mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  for key in list(params.keys()):
+    params[f'{key}_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['trans_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+
+  #params['dna2'] = torch.zeros((BATCH_SIZE*2, DNA_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   #for i in range(9):
   #  params[f'input_{i}'] = torch.zeros((BATCH_SIZE*2, (BOARD_SIZE*3 + NOISE_SIZE*2) * EMBED_N), dtype=torch.float, device=DEVICE)
   #  params[f'bias_{i}'] = torch.zeros((BATCH_SIZE*2, EMBED_N), dtype=torch.float, device=DEVICE)
@@ -291,19 +341,21 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   #  meta_shape = tuple(list(params[key].shape) + [META_INPUT])
   #  params[key + '_meta'] = torch.zeros(meta_shape, dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   #params['embryogenesis'] = torch.zeros((BATCH_SIZE*2, META_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
-  params['embryogenesis_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
+  #params['embryogenesis_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
+  #params['trans_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
+  #params['mutation_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1,1)
     
   perfect_params = pickle.load(open('perfect_dna.pkl', 'rb'))
   max_param = max([abs(perfect_params[key]).max() for key in perfect_params])
   perfect_players = Players.from_params(perfect_params, bs=BATCH_SIZE, device=DEVICE)
-  perfect_players.perfect = torch.ones(BATCH_SIZE, device=DEVICE, dtype=torch.bool)
+  perfect_players.credits = torch.ones(BATCH_SIZE, device=DEVICE, dtype=torch.bool)
 
   PERFECT_AMOUNT = BATCH_SIZE//10
   for key in perfect_params:
     params[key][:PERFECT_AMOUNT] = torch.cat([perfect_params[key] for _ in range(PERFECT_AMOUNT)], dim=0)/max_param
     params[key][:PERFECT_AMOUNT] += torch.randn_like(params[key][:PERFECT_AMOUNT]) * 1e-1
   players = Players(params)
-  #players.perfect[:PERFECT_AMOUNT] = True
+  players.credits = torch.ones((BATCH_SIZE*2,), device=DEVICE) * INIT_CREDS
 
 
   import time
@@ -331,11 +383,12 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
         b_wins += (games.winners == PLAYERS.X)
     #mut_rate = a_players.avg_log_mutuation()
     mut_size = a_players.avg_log_mutuation_size()
+    trans_mut = a_players.trans_mut()
     t2 = time.time()
-    mate(a_players, b_players, a_wins > b_wins, a_wins < b_wins)
-    t3 = time.time()
     concat_players = Players(concat_params(a_players.params, b_players.params))
-    concat_players.perfect = torch.cat([a_players.perfect, b_players.perfect])
+    concat_players.credits = torch.cat([a_players.credits, b_players.credits])
+    t3 = time.time()
+    concat_players.mate()
     a_players, b_players = swizzle_players(concat_players, bs=BATCH_SIZE)
     t4 = time.time()
     if step % 100 == 0:
@@ -350,6 +403,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
       writer.add_scalar('total_moves', games.total_moves, step)
       #writer.add_scalar('avg_log_mutuation', mut_rate, step)
       writer.add_scalar('avg_log_mutuation_size', mut_size, step)
+      writer.add_scalar('trans_mutuation', trans_mut, step)
       writer.add_scalar('draw_rate',(a_wins == b_wins).float().mean(), step)
 
     if step % 100 == 0:
@@ -372,7 +426,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(20,1000):
-    bs = 10000
+  for i in range(120,2000):
+    bs = 5000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
