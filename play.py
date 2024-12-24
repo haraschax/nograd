@@ -67,7 +67,9 @@ if __name__ == '__main__':
   else:
     params = pickle.load(open('organic_dna.pkl', 'rb'))
     players = Players.from_params(params, device=device)
-  print(players.params['input'].shape)
+
+  def play_human():
+    pass
 
   while not games.game_over[0]:
     for event in pygame.event.get():

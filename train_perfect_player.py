@@ -91,7 +91,7 @@ class TicTacToeDataset(Dataset):
         board = torch.tensor(board).long()
         board_flat_onehot = torch.nn.functional.one_hot(board.flatten(), num_classes=3).float()
         
-        board = torch.cat([board_flat_onehot.flatten(), 0.5*torch.ones((32,))])
+        board = torch.cat([board_flat_onehot.flatten(), 0.5*torch.ones((4,))])
         move = move[0] * 3 + move[1]  # Convert move to single integer
         return board, move
 
@@ -99,9 +99,9 @@ class TicTacToeDataset(Dataset):
 class TicTacToeNN(nn.Module):
     def __init__(self):
         super(TicTacToeNN, self).__init__()
-        self.fc1 = nn.Linear(59, EMBED_N)
+        self.fc1 = nn.Linear(31, 16)
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(EMBED_N, 9, bias=False)
+        self.fc2 = nn.Linear(16, 9, bias=False)
         
     def forward(self, x):
         x = self.fc1(x)
