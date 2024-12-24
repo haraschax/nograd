@@ -13,7 +13,7 @@ from batch_arena import Games, Players
 pygame.init()
 
 SQUARE_SIZE = 100
-WIDTH, HEIGHT = BOARD_ROWS * SQUARE_SIZE, BOARD_COLS * SQUARE_SIZE
+WIDTH, HEIGHT = BOARD_COLS * SQUARE_SIZE, BOARD_ROWS * SQUARE_SIZE
 LINE_WIDTH = 10
 MARK_SIZE = 70
 CROSS_SIZE = 30
@@ -57,6 +57,8 @@ if __name__ == '__main__':
   args = parser.parse_args()
 
   draw_lines()
+  pygame.display.update()
+
   device = 'cuda'
   games = Games(bs=1, device=device)
 
@@ -79,15 +81,14 @@ if __name__ == '__main__':
         mouseX = event.pos[0]
         mouseY = event.pos[1]
 
-        clicked_row = int(mouseY // SQUARE_SIZE)
         clicked_col = int(mouseX // SQUARE_SIZE)
-        move = torch.zeros((3,3), device=device)
+        move = torch.zeros((BOARD_COLS), device=device)
         
-        move[clicked_row, clicked_col] = 1
-        games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X, test=True)
+        move[clicked_col] = 1
+        games.update(move.reshape((1,BOARD_COLS)), PLAYERS.X, test=True)
         if not games.game_over[0]:
           move = players.play(games.boards, test=True)
-          games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.O, test=True)
+          games.update(move.reshape((1,BOARD_COLS)), PLAYERS.O, test=True)
 
     draw_figures(games.boards.cpu().reshape((BOARD_ROWS,BOARD_COLS)).numpy())
     pygame.display.update()

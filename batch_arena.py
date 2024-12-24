@@ -5,7 +5,7 @@ import math
 import numpy as np
 torch.set_grad_enabled(False)
 import torch.nn.functional as F
-from helpers import PLAYERS, next_player, BOARD_SIZE
+from helpers import PLAYERS, next_player, BOARD_SIZE, BOARD_COLS, BOARD_ROWS
 from tensorboardX import SummaryWriter
 from torch.nn import functional as F
 #import torch_dct as dct
@@ -17,7 +17,7 @@ EMBED_N = 16
 NOISE_SIZE = 4
 MUTATION_PARAMS_SIZE = 50
 INPUT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * EMBED_N
-OUTPUT_DIM = EMBED_N * BOARD_SIZE
+OUTPUT_DIM = EMBED_N * 7
 STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 10
@@ -57,39 +57,126 @@ class Games():
     self.update_game_over()
 
   def update(self, moves, player, test=False, player_dict=None):
-    assert len(moves) == self.bs
-    assert len(moves) == self.boards.shape[0]
-    move_idxs = torch.argmax(moves, dim=1, keepdim=True)
-    assert (self.illegal_movers[self.game_over == 0] == PLAYERS.NONE).all()
+    """
+    Update the game state with the given moves for Connect4.
+    Each move is a column index in [0..6], where the piece will fall
+    to the lowest empty row of that column (row=5 is bottom, row=0 is top).
+    """
 
-    illegal_moves = (self.boards.gather(1, move_idxs) != PLAYERS.NONE).reshape(-1)
-    self.illegal_movers[(self.game_over == 0) & illegal_moves] = PLAYERS.O if player == PLAYERS.O else PLAYERS.X
-    self.winners[illegal_moves & (self.game_over == 0)] = PLAYERS.O if player == PLAYERS.X else PLAYERS.X
+    # 1) Basic checks
+    assert moves.shape == (self.bs, 7), (
+        f"Expected moves of shape (batch_size, 7), got {moves.shape}"
+    )
+    assert len(moves) == self.boards.shape[0]
+    # Pick the chosen column for each board
+    move_cols = torch.argmax(moves, dim=1)  # shape: (bs,)
+
+    # 2) Reshape the board to (bs, 6, 7) for easy row/col indexing
+    board_3d = self.boards.view(self.bs, 6, 7)
+
+    # 3) For each batch element, find the lowest empty row in the chosen column
+    # Initialize row positions to -1 (meaning "no valid row found yet")
+    row_positions = torch.full(
+        (self.bs,), -1, dtype=torch.long, device=self.device
+    )
+
+    # We'll iterate from bottom row=5 upward to row=0
+    # and record the first empty cell we find.
+    for row in reversed(range(6)):  # row=5..0
+        # Check which batch elements still have no row assigned (row_positions == -1)
+        # and see if that cell in (row, chosen_col) is empty (PLAYERS.NONE).
+        not_assigned_yet = (row_positions == -1)
+        cell_is_empty = (
+            board_3d[torch.arange(self.bs, device=self.device), row, move_cols] 
+            == PLAYERS.NONE
+        )
+        # We can place the piece if it's empty and we haven't yet assigned a row
+        can_place = not_assigned_yet & cell_is_empty
+        row_positions[can_place] = row  # record the row where the piece will fall
+
+    # 4) Mark illegal moves
+    # A move is illegal if there's no available row (row_positions == -1)
+    # for a board that is not already over (self.game_over == 0).
+    illegal_moves = (row_positions == -1) & (self.game_over == 0)
+
+    # Record which player caused the illegal move
+    self.illegal_movers[illegal_moves] = (
+        PLAYERS.O if player == PLAYERS.O else PLAYERS.X
+    )
+    # By your convention, if the active player tries an illegal move, 
+    # the other player is declared winner:
+    self.winners[illegal_moves] = (
+        PLAYERS.O if player == PLAYERS.X else PLAYERS.X
+    )
+
+    # Update game_over flags for boards that just became finished
     self.update_game_over()
 
-    move_scattered = torch.zeros_like(self.boards.to(dtype=torch.bool))
-    move_scattered.scatter_(1, move_idxs, 1)
+    # 5) Place the piece in legal positions
+    # We only place a piece if it's not illegal and the game isn't already over.
+    legal_mask = (~illegal_moves) & (self.game_over == 0)
+    batch_idx = torch.arange(self.bs, device=self.device)
+    # index into [batch, row, col]
+    board_3d[batch_idx[legal_mask], row_positions[legal_mask], move_cols[legal_mask]] = player
 
-    self.boards = self.boards + (self.game_over == 0)[:,None] * move_scattered * player
+    # 6) Flatten the board back to (bs, 42)
+    self.boards = board_3d.view(self.bs, 42)
+
+    # 7) Check for winners (four-in-a-row)
     self.check_winners(player_dict)
     self.update_game_over()
 
   def check_winners(self, player_dict=None):
-    boards = self.boards.reshape((-1, 3, 3))
+    # 1) Reshape boards to (M, 6, 7) for Connect4
+    boards = self.boards.reshape((-1, 6, 7))
     M, rows, cols = boards.shape
-    assert rows == 3 and cols == 3, "Each board must be a 3x3 grid."
+    assert rows == 6 and cols == 7, "Each board must be 6x7 for Connect4."
+    
     winners = torch.zeros(M, dtype=torch.int8, device=self.device)
-    for player in [PLAYERS.X, PLAYERS.O]:
-      rows_winner = torch.any(torch.all(boards == player, dim=1), dim=1)
-      cols_winner = torch.any(torch.all(boards == player, dim=2), dim=1)
-      winners[rows_winner | cols_winner] = player
 
-      diag1 = boards[:, torch.arange(3), torch.arange(3)]
-      diag2 = boards[:, torch.arange(3), torch.arange(2, -1, -1)]
-      diag1_winner = torch.all(diag1 == player, dim=1)
-      diag2_winner = torch.all(diag2 == player, dim=1)
-      winners[diag1_winner | diag2_winner] = player
-    self.winners[self.winners == PLAYERS.NONE] = winners[self.winners == PLAYERS.NONE]
+    # 2) Define 2D convolution kernels for each direction
+    #    Each kernel is shape (out_channels=1, in_channels=1, kernel_height, kernel_width)
+    kernel_h = torch.ones((1, 1, 1, 4), device=self.device)   # horizontal (1x4)
+    kernel_v = torch.ones((1, 1, 4, 1), device=self.device)   # vertical   (4x1)
+    
+    # Down-right diagonal: an identity matrix of size 4x4
+    # [ [1, 0, 0, 0],
+    #   [0, 1, 0, 0],
+    #   [0, 0, 1, 0],
+    #   [0, 0, 0, 1] ]
+    kernel_dr = torch.eye(4, device=self.device).view(1, 1, 4, 4)
+    
+    # Down-left diagonal: flip the above kernel horizontally
+    # [ [0, 0, 0, 1],
+    #   [0, 0, 1, 0],
+    #   [0, 1, 0, 0],
+    #   [1, 0, 0, 0] ]
+    kernel_dl = torch.flip(kernel_dr, dims=[3])  # flip over width-dimension
+
+    for player in [PLAYERS.X, PLAYERS.O]:
+        # 3) Build a binary mask for the current player: shape (M,1,6,7)
+        board_mask = (boards == player).float().unsqueeze(1)
+
+        # 4) Apply the 2D convolutions
+        conv_h  = F.conv2d(board_mask, kernel_h)   # shape: (M,1,6,7-4+1)
+        conv_v  = F.conv2d(board_mask, kernel_v)   # shape: (M,1,6-4+1,7)
+        conv_dr = F.conv2d(board_mask, kernel_dr)  # shape: (M,1,6-4+1,7-4+1)
+        conv_dl = F.conv2d(board_mask, kernel_dl)
+
+        # 5) Check if any cell in the convolution output == 4
+        #    (which means 4 consecutive 1’s, i.e. 4 in a row)
+        wins_h  = (conv_h.squeeze(1)  == 4).any(dim=[1, 2])
+        wins_v  = (conv_v.squeeze(1)  == 4).any(dim=[1, 2])
+        wins_dr = (conv_dr.squeeze(1) == 4).any(dim=[1, 2])
+        wins_dl = (conv_dl.squeeze(1) == 4).any(dim=[1, 2])
+
+        # If any direction is True, that board has a winner of 'player'
+        has_win = wins_h | wins_v | wins_dr | wins_dl
+        winners[has_win] = player
+
+    # 6) Update only boards that do not already have a winner
+    no_winner_mask = (self.winners == PLAYERS.NONE)
+    self.winners[no_winner_mask] = winners[no_winner_mask]
 
   @property
   def losers(self):
@@ -135,26 +222,16 @@ class Players():
 
     inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), noise], dim=1)
 
+    dna_by_gene = self.params['dna'].reshape(self.bs, GENE_N, GENE_SIZE)   
+    matrix_A = dna_by_gene[:,:,:INPUT_DIM].reshape((self.bs * GENE_N, BOARD_SIZE*3 + NOISE_SIZE, EMBED_N))
+    bias = dna_by_gene[:,:,INPUT_DIM:INPUT_DIM+BIAS_DIM].reshape((self.bs * GENE_N, EMBED_N))
+    matrix_B = dna_by_gene[:,:,INPUT_DIM+BIAS_DIM:INPUT_DIM+BIAS_DIM+OUTPUT_DIM].reshape((self.bs * GENE_N, EMBED_N, BOARD_COLS))
 
-
-    if 'input' in self.params:
-      matrix_A = self.params['input'].reshape((self.bs, BOARD_SIZE*3 + NOISE_SIZE, 512))
-      matrix_B = self.params['output'].reshape((self.bs,  512, BOARD_SIZE))
-      embed = torch.einsum('bji, bj->bi', matrix_A, inputs)
-      embed = embed + self.params['bias']
-      embed = torch.relu(embed)
-      moves = torch.einsum('bji, bj->bi', matrix_B, embed)
-    else:  
-      dna_by_gene = self.params['dna'].reshape(self.bs, GENE_N, GENE_SIZE)   
-      matrix_A = dna_by_gene[:,:,:INPUT_DIM].reshape((self.bs * GENE_N, BOARD_SIZE*3 + NOISE_SIZE, EMBED_N))
-      bias = dna_by_gene[:,:,INPUT_DIM:INPUT_DIM+BIAS_DIM].reshape((self.bs * GENE_N, EMBED_N))
-      matrix_B = dna_by_gene[:,:,INPUT_DIM+BIAS_DIM:INPUT_DIM+BIAS_DIM+OUTPUT_DIM].reshape((self.bs * GENE_N, EMBED_N, BOARD_SIZE))
-
-      embed = torch.einsum('bji, bj->bi', matrix_A, inputs.tile((1,GENE_N)).reshape((GENE_N*self.bs, BOARD_SIZE*3 + NOISE_SIZE)))
-      embed = embed + bias
-      embed = torch.relu(embed)
-      out = torch.einsum('bji, bj->bi', matrix_B, embed)
-      moves = out.reshape((self.bs, GENE_N, BOARD_SIZE)).sum(dim=1)
+    embed = torch.einsum('bji, bj->bi', matrix_A, inputs.tile((1,GENE_N)).reshape((GENE_N*self.bs, BOARD_SIZE*3 + NOISE_SIZE)))
+    embed = embed + bias
+    embed = torch.relu(embed)
+    out = torch.einsum('bji, bj->bi', matrix_B, embed)
+    moves = out.reshape((self.bs, GENE_N, BOARD_COLS)).sum(dim=1)
 
 
     moves = torch.nn.functional.normalize(moves, dim=1)
@@ -169,8 +246,8 @@ class Players():
     #  return moves
     #else:
     #  return moves
-    if not test:
-      moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.003).float()
+    #if not test:
+    #  moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.003).float()
     return moves
 
   def trans_mut(self):
@@ -198,7 +275,6 @@ class Players():
     trans_mut_logit += self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))[:,:,-2*GENE_MUTATION_SIZE:-GENE_MUTATION_SIZE].sum(dim=2).clone()
 
     trans_mut_rates = torch.torch.sigmoid(trans_mut_logit)/4
-    trans_mut_rates[:] = 0.01
     mix_mutation = (torch.rand_like(self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))[:,:,0]) < trans_mut_rates)[:,:,None].float()
     pre_mixed_params = self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))
     new_params['dna'][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate]).reshape((-1, GENE_N*GENE_SIZE))
@@ -269,11 +345,6 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   params['dna_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['trans_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['mutation_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-    
-  perfect_params = pickle.load(open('perfect_dna.pkl', 'rb'))
-  perfect_params['dna'] = torch.zeros((BATCH_SIZE, GENE_SIZE*GENE_N), dtype=torch.float, device=DEVICE)
-  perfect_players = Players.from_params(perfect_params, bs=BATCH_SIZE, device=DEVICE)
-  perfect_players.perfect = torch.ones(BATCH_SIZE, device=DEVICE, dtype=torch.bool)
 
   players = Players(params)
   players.credits = torch.ones((BATCH_SIZE*2,), device=DEVICE) * INIT_CREDS
@@ -310,7 +381,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
     t4 = time.time()
     if step % 100 == 0:
       writer.add_scalar('total_moves_val', games.total_moves, step)
-      assert ((games.illegal_movers != games.winners) | (games._total_moves == 9)).all()
+      assert ((games.illegal_movers != games.winners) | (games._total_moves == BOARD_SIZE)).all()
       writer.add_scalar('o_illegal_move_rate', (games.illegal_movers == PLAYERS.O).sum()/BATCH_SIZE, step)
       writer.add_scalar('x_illegal_move_rate', (games.illegal_movers == PLAYERS.X).sum()/BATCH_SIZE, step)
       writer.add_scalar('o_win_rate', ((games.winners == PLAYERS.O) & (games.illegal_movers != PLAYERS.X)).sum()/BATCH_SIZE, step)
@@ -326,21 +397,12 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
       string = f'swizzling took {1000*(t4-t3):.2f}ms, playing took {1000*(t2-t1):.2f}ms, mating took {1000*(t3-t2):.2f}ms'
       pbar.set_description(string)
     if step % 1000 == 0:
-      print('Saving...')
       pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
-      a_games = Games(bs=BATCH_SIZE, device=DEVICE)
-      play_games(a_games, a_players, perfect_players, test=True)
-      b_games = Games(bs=BATCH_SIZE, device=DEVICE)
-      play_games(b_games, perfect_players, b_players, test=True)
-      
-      perfect_total_moves = (a_games.total_moves + b_games.total_moves)/2
-      print(f'Vs perfect player avg total moves: {perfect_total_moves:.2f}')
-      writer.add_scalar('avg_moves_vs_perfect_player', perfect_total_moves, step)
 
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(10,2000):
-    bs = 2000
+  for i in range(0,2000):
+    bs = 500
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
