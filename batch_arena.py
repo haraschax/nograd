@@ -21,7 +21,7 @@ OUTPUT_DIM = EMBED_N * BOARD_SIZE
 STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 10
-GENE_SIZE = 64
+GENE_SIZE = 128
 GENE_N = 16
 
 DNA_SIZE = GENE_N * GENE_SIZE
@@ -124,7 +124,7 @@ class Players():
 
 
     STATE_SIZE = 128
-    CORE_SIZE = 8
+    CORE_SIZE = 32
     state = torch.zeros((self.bs, STATE_SIZE), device=boards.device)
     moves = torch.zeros((self.bs, BOARD_SIZE), device=boards.device)
     state[:,:BOARD_SIZE*3 + NOISE_SIZE] = inputs
@@ -134,19 +134,19 @@ class Players():
     for i in range(GENE_N):
       bias = dna_by_gene[:, i, CORE_SIZE:2*CORE_SIZE]
       a_mask = (dna_by_gene[:, i, 2*CORE_SIZE:3*CORE_SIZE] > 0).float()
-      b_mask = (dna_by_gene[:, i, 3*CORE_SIZE:4*CORE_SIZE] > 0).float()
-      bias_mask = (dna_by_gene[:, i, 4*CORE_SIZE:5*CORE_SIZE] > 0).float()
+      #b_mask = (dna_by_gene[:, i, 3*CORE_SIZE:4*CORE_SIZE] > 0).float()
+      #bias_mask = (dna_by_gene[:, i, 4*CORE_SIZE:5*CORE_SIZE] > 0).float()
 
       idx_in_a = ((dna_by_gene[:, i, 0]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
-      idx_in_b = ((dna_by_gene[:, i, 1]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
+      #idx_in_b = ((dna_by_gene[:, i, 1]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
       out_idx = ((dna_by_gene[:, i, 3]/2 + 0.5) * (STATE_SIZE - 31)).to(dtype=torch.long) + 31
       move_idx = ((dna_by_gene[:, i, 3]/2 + 0.5) * BOARD_SIZE).to(dtype=torch.long)
 
       #print(move_idx.min())
 
       bool_relu_a = (dna_by_gene[:, i, 4] > 0).reshape((-1,1)).float()
-      bool_relu_b = (dna_by_gene[:, i, 5] > 0).reshape((-1,1)).float()
-      bool_mult = (dna_by_gene[:, i, 6] > 0).reshape((-1,1)).float()
+      #bool_relu_b = (dna_by_gene[:, i, 5] > 0).reshape((-1,1)).float()
+      #bool_mult = (dna_by_gene[:, i, 6] > 0).reshape((-1,1)).float()
       bool_out = (dna_by_gene[:, i, 7] > 0).reshape((-1,1)).float()
 
       B = state.size(0)
@@ -156,17 +156,19 @@ class Players():
       out_cols = out_idx.unsqueeze(1) + rel_idx_out  # Shape: [B, CORE_SIZE]
       move_cols = move_idx.unsqueeze(1) + rel_idx_out  # Shape: [B, CORE_SIZE]
       a_cols = idx_in_a.unsqueeze(1) + rel_idx     # Shape: [B, CORE_SIZE]
-      b_cols = idx_in_b.unsqueeze(1) + rel_idx     # Shape: [B, CORE_SIZE]
+      #b_cols = idx_in_b.unsqueeze(1) + rel_idx     # Shape: [B, CORE_SIZE]
       batch_idx = torch.arange(B, device=device).unsqueeze(1)  # Shape: [B, 1]
-      term1 = bias * bias_mask               # Shape: [B]
-      term2 = state[batch_idx, a_cols] * a_mask
-      term3 = state[batch_idx, b_cols] * b_mask
-      term2 = torch.relu(term2) * bool_relu_a + term2 * (1 - bool_relu_a)
-      term3 = torch.relu(term3) * bool_relu_b + term3 * (1 - bool_relu_b)
+      #term1 = bias * bias_mask               # Shape: [B]
+      #term2 = state[batch_idx, a_cols] * a_mask
+      #term3 = state[batch_idx, b_cols] * b_mask
+      #term2 = torch.relu(term2) * bool_relu_a + term2 * (1 - bool_relu_a)
+      #term3 = torch.relu(term3) * bool_relu_b + term3 * (1 - bool_relu_b)
 
-      term4 = (state[batch_idx, a_cols] * state[batch_idx, b_cols] *
-              bool_mult)
-      update = term1 + term2 + term3 + term4
+      #term4 = (state[batch_idx, a_cols] * state[batch_idx, b_cols] *
+      #        bool_mult)
+      #update = term1 + term2 + term3 + term4
+      update = bias * a_mask * state[batch_idx, a_cols]
+      update = bool_relu_a * torch.relu(update) + (1 - bool_relu_a) * update
       state[batch_idx, out_cols] += (1 - bool_out) * torch.sign(update.sum(dim=1).unsqueeze(1))
       moves[batch_idx, move_cols] += bool_out * update.sum(dim=1).unsqueeze(1)
 
@@ -299,7 +301,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
 
   import time
   import tqdm
-  pbar = tqdm.tqdm(range(200000))
+  pbar = tqdm.tqdm(range(500000))
   a_players, b_players = swizzle_players(players, bs=BATCH_SIZE)
 
   for step in pbar:
@@ -319,7 +321,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
     concat_players = Players(concat_params(a_players.params, b_players.params))
     concat_players.credits = torch.cat([a_players.credits, b_players.credits])
     if step % 100 == 0:
-      print(f'mean a_player credits: {a_players.credits.mean()} and mean b_player credits: {b_players.credits.mean()}')
+      print(f'mean a_player credits: {a_players.credits.mean():2f} and mean b_player credits: {b_players.credits.mean():.2f}')
 
     #concat_players.credits += INIT_CREDS - concat_players.credits.mean()
     t3 = time.time()
@@ -358,7 +360,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(20,2000):
+  for i in range(40,2000):
     bs = 100000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
