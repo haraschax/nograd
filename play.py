@@ -71,6 +71,8 @@ if __name__ == '__main__':
   def play_human():
     pass
 
+  move = players.play(games.boards, test=True)
+  games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X, test=True)
   while not games.game_over[0]:
     for event in pygame.event.get():
       if event.type == pygame.QUIT:
@@ -84,10 +86,10 @@ if __name__ == '__main__':
         move = torch.zeros((3,3), device=device)
         
         move[clicked_row, clicked_col] = 1
-        games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X, test=True)
+        games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.O, test=True)
         if not games.game_over[0]:
           move = players.play(games.boards, test=True)
-          games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.O, test=True)
+          games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X, test=True)
 
     draw_figures(games.boards.cpu().reshape((BOARD_ROWS,BOARD_COLS)).numpy())
     pygame.display.update()

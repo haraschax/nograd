@@ -21,8 +21,10 @@ OUTPUT_DIM = EMBED_N * BOARD_SIZE
 STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 10
-GENE_SIZE = 128
-GENE_N = 16
+GENE_SIZE = 138
+GENE_I = 64
+GENE_J = 2
+GENE_N = GENE_I * GENE_J
 
 DNA_SIZE = GENE_N * GENE_SIZE
 
@@ -129,9 +131,12 @@ class Players():
     moves = torch.zeros((self.bs, BOARD_SIZE), device=boards.device)
     state[:,:BOARD_SIZE*3 + NOISE_SIZE] = inputs
 
-    dna_by_gene = self.params['dna'].reshape(self.bs, GENE_N, GENE_SIZE)
+    dna_by_gene = self.params['dna'].reshape(self.bs * GENE_I, GENE_J, GENE_SIZE)
 
-    for i in range(GENE_N):
+    for i in range(GENE_J):
+      state_expanded = torch.zeros((self.bs * GENE_I, STATE_SIZE), device=boards.device)
+      moves_expanded = torch.zeros((self.bs * GENE_I, BOARD_SIZE), device=boards.device)
+
       bias = dna_by_gene[:, i, CORE_SIZE:2*CORE_SIZE]
       a_mask = (dna_by_gene[:, i, 2*CORE_SIZE:3*CORE_SIZE] > 0).float()
       #b_mask = (dna_by_gene[:, i, 3*CORE_SIZE:4*CORE_SIZE] > 0).float()
@@ -139,7 +144,7 @@ class Players():
 
       idx_in_a = ((dna_by_gene[:, i, 0]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
       #idx_in_b = ((dna_by_gene[:, i, 1]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
-      out_idx = ((dna_by_gene[:, i, 3]/2 + 0.5) * (STATE_SIZE - 31)).to(dtype=torch.long) + 31
+      out_idx = ((dna_by_gene[:, i, 2]/2 + 0.5) * (STATE_SIZE - 31)).to(dtype=torch.long) + 31
       move_idx = ((dna_by_gene[:, i, 3]/2 + 0.5) * BOARD_SIZE).to(dtype=torch.long)
 
       #print(move_idx.min())
@@ -149,7 +154,7 @@ class Players():
       #bool_mult = (dna_by_gene[:, i, 6] > 0).reshape((-1,1)).float()
       bool_out = (dna_by_gene[:, i, 7] > 0).reshape((-1,1)).float()
 
-      B = state.size(0)
+      B = self.bs * GENE_I
       device = state.device
       rel_idx = torch.arange(CORE_SIZE, device=device).unsqueeze(0)  # Shape: [1, CORE_SIZE]
       rel_idx_out = torch.arange(1, device=device).unsqueeze(0)  # Shape: [1, CORE_SIZE]
@@ -157,7 +162,8 @@ class Players():
       move_cols = move_idx.unsqueeze(1) + rel_idx_out  # Shape: [B, CORE_SIZE]
       a_cols = idx_in_a.unsqueeze(1) + rel_idx     # Shape: [B, CORE_SIZE]
       #b_cols = idx_in_b.unsqueeze(1) + rel_idx     # Shape: [B, CORE_SIZE]
-      batch_idx = torch.arange(B, device=device).unsqueeze(1)  # Shape: [B, 1]
+      batch_idx = torch.arange(B, device=device).unsqueeze(1)//GENE_I  # Shape: [B, 1]
+      batch_exapanded_idx = torch.arange(B, device=device).unsqueeze(1)  # Shape: [B, 1]
       #term1 = bias * bias_mask               # Shape: [B]
       #term2 = state[batch_idx, a_cols] * a_mask
       #term3 = state[batch_idx, b_cols] * b_mask
@@ -169,27 +175,18 @@ class Players():
       #update = term1 + term2 + term3 + term4
       update = bias * a_mask * state[batch_idx, a_cols]
       update = bool_relu_a * torch.relu(update) + (1 - bool_relu_a) * update
-      state[batch_idx, out_cols] += (1 - bool_out) * torch.sign(update.sum(dim=1).unsqueeze(1))
-      moves[batch_idx, move_cols] += bool_out * update.sum(dim=1).unsqueeze(1)
+      #print(batch_idx.shape, out_cols.shape, update.shape)
+      state_expanded[batch_exapanded_idx, out_cols] += (1 - bool_out) * (update.sum(dim=1).unsqueeze(1))
+      moves_expanded[batch_exapanded_idx, move_cols] += bool_out * (update.sum(dim=1).unsqueeze(1))
 
+      state += torch.sign(state_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1))
+      moves += torch.sign(moves_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1))
 
-    moves = torch.clone(state[:,-BOARD_SIZE:])
-
-
+    #moves = torch.clone(state[:,-BOARD_SIZE:])
     moves = torch.nn.functional.normalize(moves, dim=1)
-   
-
-    #moves = torch.softmax(10*moves, dim=1)
-    #if not test:
-     # #moves[boards == PLAYERS.NONE] += 0.01
-    #  moves /= moves.sum(dim=1)[:, None]
-    #  sample_idx = torch.multinomial(moves, num_samples=1)
-    #  moves = F.one_hot(sample_idx.long(), num_classes=9)[:,0,:].float()
-    #  return moves
-    #else:
-    #  return moves
-    #if not test:
-    #  moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.003).float()
+    
+    if not test:
+      moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.003).float()
     return moves
 
   def trans_mut(self):
@@ -235,7 +232,7 @@ class Players():
         self.params[key][dead] = param[:len(dead)]
       else:
         mutation_logit = self.params['dna_mutation'].sum(dim=1)[:,None].expand((-1, GENE_N)).clone()
-        #mutation_logit += self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))[:,:,-GENE_MUTATION_SIZE:].sum(dim=2).clone()
+        mutation_logit += self.params['dna'].reshape((self.bs, GENE_I*GENE_J, GENE_SIZE))[:,:,-GENE_MUTATION_SIZE:].sum(dim=2).clone()
         mutation_rate = torch.sigmoid(mutation_logit)[can_mate][:,:,None]
         param = torch.clone(new_params[key])[can_mate].reshape((-1, GENE_N, GENE_SIZE))
         mutation = (torch.rand_like(param) < mutation_rate).float()
@@ -329,7 +326,10 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
     a_players, b_players = swizzle_players(concat_players, bs=BATCH_SIZE)
     t4 = time.time()
     if step % 100 == 0:
-      writer.add_scalar('total_moves_val', games.total_moves, step)
+      games_val = Games(bs=BATCH_SIZE)
+      play_games(games_val, a_players, b_players, test=True)
+      
+      writer.add_scalar('total_moves_val', games_val.total_moves, step)
       assert ((games.illegal_movers != games.winners) | (games._total_moves == 9)).all()
       writer.add_scalar('o_illegal_move_rate', (games.illegal_movers == PLAYERS.O).sum()/BATCH_SIZE, step)
       writer.add_scalar('x_illegal_move_rate', (games.illegal_movers == PLAYERS.X).sum()/BATCH_SIZE, step)
@@ -360,7 +360,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(40,2000):
-    bs = 100000
+  for i in range(1100,2000):
+    bs = 10000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
