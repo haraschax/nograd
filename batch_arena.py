@@ -20,14 +20,14 @@ INPUT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * EMBED_N
 OUTPUT_DIM = EMBED_N * BOARD_SIZE
 STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
-GENE_MUTATION_SIZE = 10
-CORE_SIZE = 8
-GENE_I = 16
-GENE_J = 16
+GENE_MUTATION_SIZE = 0
+CORE_SIZE = 1
+GENE_I = 128
+GENE_J = 32
 GENE_N = GENE_I * GENE_J
 STATE_SIZE = 128
-BOOLS_SIZE = 8
-GENE_SIZE = BOOLS_SIZE + 4*CORE_SIZE + GENE_MUTATION_SIZE
+BOOLS_SIZE = 3
+GENE_SIZE = BOOLS_SIZE + GENE_MUTATION_SIZE
 
 DNA_SIZE = GENE_N * GENE_SIZE
 
@@ -120,22 +120,23 @@ class Players():
 
 
   def run_dna(self, dna_by_gene, input_vector):
+
     for i in range(dna_by_gene.shape[1]):
       state_expanded = torch.zeros((self.bs * GENE_I, STATE_SIZE), device=input_vector.device)
 
-      bias = dna_by_gene[:, i, BOOLS_SIZE:BOOLS_SIZE+CORE_SIZE]
-      a_mask = (dna_by_gene[:, i, BOOLS_SIZE+CORE_SIZE:BOOLS_SIZE+2*CORE_SIZE] > 0).float()
-      b_mask = (dna_by_gene[:, i, BOOLS_SIZE+2*CORE_SIZE:BOOLS_SIZE+3*CORE_SIZE] > 0).float()
-      bias_mask = (dna_by_gene[:, i, BOOLS_SIZE+3*CORE_SIZE:BOOLS_SIZE+4*CORE_SIZE] > 0).float()
+      #bias = dna_by_gene[:, i, BOOLS_SIZE:BOOLS_SIZE+CORE_SIZE]
+      #a_mask = (dna_by_gene[:, i, BOOLS_SIZE+CORE_SIZE:BOOLS_SIZE+2*CORE_SIZE] > 0).float()
+      #b_mask = (dna_by_gene[:, i, BOOLS_SIZE+2*CORE_SIZE:BOOLS_SIZE+3*CORE_SIZE] > 0).float()
+      #bias_mask = (dna_by_gene[:, i, BOOLS_SIZE+3*CORE_SIZE:BOOLS_SIZE+4*CORE_SIZE] > 0).float()
 
       idx_in_a = ((dna_by_gene[:, i, 0]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
       idx_in_b = ((dna_by_gene[:, i, 1]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
       out_idx = ((dna_by_gene[:, i, 2]/2 + 0.5) * (STATE_SIZE - 31)).to(dtype=torch.long) + 31
-      bool_relu_a = (dna_by_gene[:, i, 3] > 0).reshape((-1,1)).float()
-      out_sign = (dna_by_gene[:, i, 4] > 0).reshape((-1,1)).float()*2 - 1
-      bool_sum = (dna_by_gene[:, i, 5] > 0).reshape((-1,1)).float()
-      bool_mult = (dna_by_gene[:, i, 6] > 0).reshape((-1,1)).float()
-      bool_out = (dna_by_gene[:, i, 7] > 0).reshape((-1,1)).float()
+      #bool_relu_a = (dna_by_gene[:, i, 3] > 0).reshape((-1,1)).float()
+      #out_sign = (dna_by_gene[:, i, 4] > 0).reshape((-1,1)).float()*2 - 1
+      #bool_sum = (dna_by_gene[:, i, 5] > 0).reshape((-1,1)).float()
+      #bool_mult = (dna_by_gene[:, i, 6] > 0).reshape((-1,1)).float()
+      #bool_out = (dna_by_gene[:, i, 7] > 0).reshape((-1,1)).float()
 
       B = self.bs * GENE_I
       device = input_vector.device
@@ -148,8 +149,8 @@ class Players():
       batch_idx = torch.arange(B, device=device).unsqueeze(1)//GENE_I  # Shape: [B, 1]
       batch_exapanded_idx = torch.arange(B, device=device).unsqueeze(1)  # Shape: [B, 1]
       #term1 = bias * bias_mask               # Shape: [B]
-      a = input_vector[batch_idx, a_cols] * a_mask
-      b = input_vector[batch_idx, b_cols] * b_mask
+      a = input_vector[batch_idx, a_cols]# * a_mask
+      b = input_vector[batch_idx, b_cols]# * b_mask
       #term2 = torch.relu(term2) * bool_relu_a + term2 * (1 - bool_relu_a)
       #term3 = torch.relu(term3) * bool_relu_b + term3 * (1 - bool_relu_b)
 
@@ -158,19 +159,19 @@ class Players():
       #update = term1 + term2 + term3 + term4
       #update = bias_mask * bias * a
       #update = bias_mask * bias * a
-      update = bias_mask * bias * bool_sum * (a + b)
-      update += bias_mask * bias * bool_mult * (a * b)
+      update = torch.logical_not(torch.logical_and(a, b))
+      #update += bias_mask * bias * bool_mult * (a * b)
       #update += a_mask * input_vector[batch_idx, a_cols]
 
       #update = bias_mask * bias + a_mask * input_vector[batch_idx, a_cols]
-      update = out_sign * (bool_relu_a * torch.relu(update) + (1 - bool_relu_a) * update)
+      #update = out_sign * (bool_relu_a * torch.relu(update) + (1 - bool_relu_a) * update)
       #print(update, bool_out)
-      state_expanded[batch_exapanded_idx, out_cols] += (1 - bool_out) * (update.sum(dim=1).unsqueeze(1))
+      state_expanded[batch_exapanded_idx, out_cols] = update.sum(dim=1).unsqueeze(1).float()
 
       #print(state_expanded)
       #print(state_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1))
       #print(input_vector)
-      input_vector += torch.sign(state_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1))
+      input_vector += state_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1).bool().float()
     return input_vector
 
   def embryogenesis(self):
@@ -258,9 +259,9 @@ class Players():
 
     new_params = {k:v.clone() for k,v in self.params.items()}
     indices = torch.randperm(len(can_mate))
-    trans_mut_rates = self.trans_mutation[:,None].expand((-1, GENE_N)).clone()
-    mix_mutation = (torch.rand_like(self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))[:,:,0]) < trans_mut_rates)[:,:,None].float()
-    pre_mixed_params = self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))
+    trans_mut_rates = self.trans_mutation[:,None].expand((-1, GENE_I)).clone()
+    mix_mutation = (torch.rand_like(self.params['dna'].reshape((self.bs, GENE_I, GENE_SIZE*GENE_J))[:,:,0]) < trans_mut_rates)[:,:,None].float()
+    pre_mixed_params = self.params['dna'].reshape((self.bs, GENE_I, GENE_SIZE*GENE_J))
     new_params['dna'][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate]).reshape((-1, GENE_N*GENE_SIZE))
 
     for key in self.params:
@@ -417,7 +418,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(2,2000):
+  for i in range(6,2000):
     bs = 5000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
