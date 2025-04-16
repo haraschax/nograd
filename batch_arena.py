@@ -21,13 +21,13 @@ OUTPUT_DIM = EMBED_N * BOARD_SIZE
 STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 0
-CORE_SIZE = 1
-GENE_I = 128
-GENE_J = 32
+CORE_SIZE = 8
+GENE_I = 64
+GENE_J = 4
 GENE_N = GENE_I * GENE_J
 STATE_SIZE = 128
 BOOLS_SIZE = 3
-GENE_SIZE = BOOLS_SIZE + GENE_MUTATION_SIZE
+GENE_SIZE = CORE_SIZE*2 + 2
 
 DNA_SIZE = GENE_N * GENE_SIZE
 
@@ -117,61 +117,27 @@ class Players():
     self.params = params
     self.mutation = torch.zeros((self.bs,), device=self.device)
     self.trans_mutation = torch.zeros((self.bs,), device=self.device)/4
+    self.weights = None
 
 
   def run_dna(self, dna_by_gene, input_vector):
-
+    input_clone = input_vector.clone()
+    input_vector = torch.sign(input_vector)
+    if self.weights is None:
+      self.weights = torch.zeros((self.bs, GENE_J, GENE_I, STATE_SIZE), device=self.params['dna'].device)
+      self.out_proj = torch.zeros((self.bs, GENE_J, GENE_I, STATE_SIZE), device=self.params['dna'].device)
+      self.bias = dna_by_gene[:, :, :, CORE_SIZE*2 + 1:CORE_SIZE*2+2]
+      for i in range(dna_by_gene.shape[1]):
+        in_idxs = (((dna_by_gene[:, i, :, :CORE_SIZE] + 1.0)*0.5) * STATE_SIZE).to(dtype=torch.int64)
+        out_idxs = (((dna_by_gene[:, i, :, CORE_SIZE*2:CORE_SIZE*2+1] + 1.0)*0.5) * STATE_SIZE).to(dtype=torch.int64)
+        val = dna_by_gene[:, i, :, CORE_SIZE:CORE_SIZE*2]
+        self.weights[:,i].scatter_(2, in_idxs, val)
+        self.out_proj[:,i].scatter_(2, out_idxs, 1.0)
     for i in range(dna_by_gene.shape[1]):
-      state_expanded = torch.zeros((self.bs * GENE_I, STATE_SIZE), device=input_vector.device)
-
-      #bias = dna_by_gene[:, i, BOOLS_SIZE:BOOLS_SIZE+CORE_SIZE]
-      #a_mask = (dna_by_gene[:, i, BOOLS_SIZE+CORE_SIZE:BOOLS_SIZE+2*CORE_SIZE] > 0).float()
-      #b_mask = (dna_by_gene[:, i, BOOLS_SIZE+2*CORE_SIZE:BOOLS_SIZE+3*CORE_SIZE] > 0).float()
-      #bias_mask = (dna_by_gene[:, i, BOOLS_SIZE+3*CORE_SIZE:BOOLS_SIZE+4*CORE_SIZE] > 0).float()
-
-      idx_in_a = ((dna_by_gene[:, i, 0]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
-      idx_in_b = ((dna_by_gene[:, i, 1]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
-      out_idx = ((dna_by_gene[:, i, 2]/2 + 0.5) * (STATE_SIZE - 31)).to(dtype=torch.long) + 31
-      #bool_relu_a = (dna_by_gene[:, i, 3] > 0).reshape((-1,1)).float()
-      #out_sign = (dna_by_gene[:, i, 4] > 0).reshape((-1,1)).float()*2 - 1
-      #bool_sum = (dna_by_gene[:, i, 5] > 0).reshape((-1,1)).float()
-      #bool_mult = (dna_by_gene[:, i, 6] > 0).reshape((-1,1)).float()
-      #bool_out = (dna_by_gene[:, i, 7] > 0).reshape((-1,1)).float()
-
-      B = self.bs * GENE_I
-      device = input_vector.device
-      rel_idx = torch.arange(CORE_SIZE, device=device).unsqueeze(0)  # Shape: [1, CORE_SIZE]
-      rel_idx_out = torch.arange(1, device=device).unsqueeze(0)  # Shape: [1, CORE_SIZE]
-      out_cols = out_idx.unsqueeze(1) + rel_idx_out  # Shape: [B, CORE_SIZE]
-      #move_cols = move_idx.unsqueeze(1) + rel_idx_out  # Shape: [B, CORE_SIZE]
-      a_cols = idx_in_a.unsqueeze(1) + rel_idx     # Shape: [B, CORE_SIZE]
-      b_cols = idx_in_b.unsqueeze(1) + rel_idx     # Shape: [B, CORE_SIZE]
-      batch_idx = torch.arange(B, device=device).unsqueeze(1)//GENE_I  # Shape: [B, 1]
-      batch_exapanded_idx = torch.arange(B, device=device).unsqueeze(1)  # Shape: [B, 1]
-      #term1 = bias * bias_mask               # Shape: [B]
-      a = input_vector[batch_idx, a_cols]# * a_mask
-      b = input_vector[batch_idx, b_cols]# * b_mask
-      #term2 = torch.relu(term2) * bool_relu_a + term2 * (1 - bool_relu_a)
-      #term3 = torch.relu(term3) * bool_relu_b + term3 * (1 - bool_relu_b)
-
-      #term4 = (state[batch_idx, a_cols] * state[batch_idx, b_cols] *
-      #        bool_mult)
-      #update = term1 + term2 + term3 + term4
-      #update = bias_mask * bias * a
-      #update = bias_mask * bias * a
-      update = torch.logical_not(torch.logical_and(a, b))
-      #update += bias_mask * bias * bool_mult * (a * b)
-      #update += a_mask * input_vector[batch_idx, a_cols]
-
-      #update = bias_mask * bias + a_mask * input_vector[batch_idx, a_cols]
-      #update = out_sign * (bool_relu_a * torch.relu(update) + (1 - bool_relu_a) * update)
-      #print(update, bool_out)
-      state_expanded[batch_exapanded_idx, out_cols] = update.sum(dim=1).unsqueeze(1).float()
-
-      #print(state_expanded)
-      #print(state_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1))
-      #print(input_vector)
-      input_vector += state_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1).bool().float()
+      #input_vector += torch.relu(torch.sign(((self.weights[:,i]*input_vector[:,None,:]).sum(dim=2, keepdim=True)*self.out_proj[:,i]).sum(dim=1)))
+      input_vector += torch.relu(torch.sign((self.bias[:,i] + (self.weights[:,i]*input_vector[:,None,:]).sum(dim=2, keepdim=True)*self.out_proj[:,i]).sum(dim=1)))
+      #input_vector = torch.nn.functional.layer_norm(input_vector, (STATE_SIZE,))
+      input_vector[:,:31] = input_clone[:,:31]
     return input_vector
 
   def embryogenesis(self):
@@ -213,7 +179,7 @@ class Players():
     boards_onehot = boards_onehot_raw.clone()
     noise = 0.5 * torch.ones((boards.shape[0], NOISE_SIZE), device=boards.device)
     noise[~self.perfect,:] = noise[~self.perfect,:].uniform_(0, 1)
-    noise[:,-1] = (current_player*torch.ones_like(noise[:,-1]) - 1.5)
+    noise[:,-NOISE_SIZE] = (current_player*torch.ones_like(noise[:,-1]) - 1.5)
 
     inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), noise], dim=1)
 
@@ -221,8 +187,9 @@ class Players():
     state = torch.zeros((self.bs, STATE_SIZE), device=boards.device)
     moves = torch.zeros((self.bs, BOARD_SIZE), device=boards.device)
     state[:,:BOARD_SIZE*3 + NOISE_SIZE] = inputs
+    state = torch.sign(state)
 
-    dna_by_gene = self.params['dna'].reshape(self.bs * GENE_I, GENE_J, GENE_SIZE)
+    dna_by_gene = self.params['dna'].reshape(self.bs, GENE_J, GENE_I, GENE_SIZE)
     state = self.run_dna(dna_by_gene, state)
 
     moves = torch.clone(state[:,-BOARD_SIZE:])# * 20 * torch.clip(torch.sigmoid(self.params['fake_mutation'].sum(dim=1)/10)[:,None], 1/20, 1)
@@ -418,7 +385,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(6,2000):
-    bs = 5000
+  for i in range(115,2000):
+    bs = 10000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
