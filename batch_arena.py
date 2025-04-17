@@ -83,29 +83,6 @@ def get_optimal_move(board, player):
                 board[i, j] = PLAYERS.NONE
     return best_move, best_score
 
-def get_score(board, player):
-    if is_winner(board, player):
-      return 1
-    elif is_draw(board):
-      return 0
-    elif is_winner(board, next_player(player)):
-      return -1
-    best_score = -np.inf
-    for i in range(3):
-        for j in range(3):
-            if board[i, j] == PLAYERS.NONE:
-                board[i, j] = player
-                if is_winner(board, player):
-                    score = 1
-                elif is_draw(board):
-                    score = 0
-                else:
-                    _, score = get_optimal_move(board, next_player(player))
-                    score = -score
-                best_score = max(best_score, score)
-                board[i, j] = PLAYERS.NONE
-    return best_score
-
 def generate_perfect_moves():
     all_boards = []
     board_hashes = set()
@@ -114,9 +91,10 @@ def generate_perfect_moves():
     board_move_pairs = []
     for board in tqdm(all_boards):
         player = PLAYERS.O if np.sum(board == PLAYERS.X) > np.sum(board == PLAYERS.O) else PLAYERS.X
-        move, _ = get_optimal_move(board, player)
-        board_move_pairs.append((board, move, player))
-    return board_move_pairs
+        move, score = get_optimal_move(board, player)
+        board_move_pairs.append((board, move, player, score))
+    board_dict = {str(k): (k, move, player, score) for k,move,player,score in board_move_pairs}
+    return board_dict
 
 def validate_model(player_instance, perfect_dataset):
     """
@@ -126,22 +104,27 @@ def validate_model(player_instance, perfect_dataset):
     match the perfect score.
     """
 
-    player = Players(splice_params(player_instance.params, [0]))
+    test_player = Players(splice_params(player_instance.params, [0]))
     good_moves = 0
     total = 0
-    for board, perfect_move, perfect_player in tqdm(perfect_dataset):
-        current_player = perfect_player
+    for v in tqdm(perfect_dataset.values()):
+        board, move, current_player, score_before = v
         board_tensor = torch.tensor(board.flatten(), dtype=torch.int64, device=DEVICE).unsqueeze(0)
         with torch.no_grad():
-            model_move_probs = player.play(board_tensor, test=True, current_player=current_player)
+            model_move_probs = test_player.play(board_tensor, test=True, current_player=current_player)
             move_index = torch.argmax(model_move_probs, dim=1).item()
         row, col = move_index // 3, move_index % 3
-        score_before = get_score(board.copy(), current_player)
 
         board_after = board.copy()
         if board_after[row, col] == PLAYERS.NONE:
           board_after[row, col] = current_player
-          score_after = -get_score(board_after.copy(), next_player(current_player))
+          if is_winner(board_after, current_player):
+            score_after = 1
+          elif is_draw(board_after):
+            score_after = 0
+          else:
+            _, _, _, s = perfect_dataset[str(board_after)]
+            score_after = -s
         else:
           score_after = -1
         
@@ -149,8 +132,7 @@ def validate_model(player_instance, perfect_dataset):
         if score_after >= score_before:
             good_moves += 1
         total += 1
-    print(good_moves, total)
-    return 100.0 * good_moves / total if total > 0 else 0.0
+    return 100.0 * good_moves / total
 
 
 def check_winner(board, conv_layer):
@@ -233,10 +215,9 @@ class Players():
   def __init__(self, params):
     self.bs = params['dna'].shape[0]
     self.device = params['dna'].device
-    self.perfect = torch.zeros(params['dna'].shape[0], device=self.device, dtype=torch.bool)
     self.params = params
     self.mutation = torch.zeros((self.bs,), device=self.device)
-    self.trans_mutation = torch.zeros((self.bs,), device=self.device)/4
+    self.trans_mutation = torch.zeros((self.bs,), device=self.device)
     self.weights = None
 
 
@@ -262,43 +243,19 @@ class Players():
 
   def embryogenesis(self):
     mut_mut_logit = self.params['mutation_mutation'].sum(dim=1)
-    #trans_mut_logit += self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))[:,:,-2*GENE_MUTATION_SIZE:-GENE_MUTATION_SIZE].sum(dim=2).clone()
-
     self.mutation_mutation = torch.torch.sigmoid(mut_mut_logit)
 
-    #state = torch.zeros((self.bs, STATE_SIZE), device=self.params['dna'].device)
-    #dna_by_gene = self.params['dna'].reshape(self.bs * GENE_I, GENE_J*2, GENE_SIZE)[:,:GENE_J,:]
-    #state = self.run_dna(dna_by_gene, state)
-    #print(state[:,-CORE_SIZE:].sum(dim=1))
-    #self.mutation = torch.sigmoid(state[:,-64:-32].sum(dim=1)/5)
-    #self.mutation = torch.sigmoid(state[:,-32:].sum(dim=1)/5)
-    #probs = torch.softmax(state[:, -32:], dim=1)
-    #sampled_index = torch.multinomial(probs, num_samples=1).squeeze(1)
     trans_mut_logit = self.params['trans_mutation'].sum(dim=1)
-    #trans_mut_logit += self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))[:,:,-2*GENE_MUTATION_SIZE:-GENE_MUTATION_SIZE].sum(dim=2).clone()
+    self.trans_mutation = torch.torch.sigmoid(trans_mut_logit)
 
-    self.trans_mutation = torch.torch.sigmoid(trans_mut_logit)/4
-    #self.trans_mutation = 1e-12*torch.exp(-torch.sum(state[:, -32:], dim=1).float())
-    #self.trans_mutation[:] = 1e-3 #torch.argmax(state[:,-32:], dim=1)
-    #print(self.mutation)
-
-    #self.mutation[:] = 1e-2
-    #self.trans_mutation = torch.sigmoid(state[:,-32:].sum(dim=1)/5)
-    #probs = torch.softmax(state[:, -64:-32]*5, dim=1)
-    #sampled_index = torch.multinomial(probs, num_samples=1).squeeze(1)
     mut_logit = self.params['mutation'].sum(dim=1)
     self.mutation = torch.torch.sigmoid(mut_logit)
 
-    #dna_by_gene = self.params['dna'].reshape(self.bs * GENE_I, GENE_J, GENE_SIZE)
-    #perm = torch.argsort(torch.rand(self.bs * GENE_I, GENE_J, device=DEVICE), dim=1)
-    #perm_expanded = perm.unsqueeze(2).expand(self.bs * GENE_I, GENE_J, GENE_SIZE)
-    #self.params['dna'] = dna_by_gene.gather(1, perm_expanded).reshape(self.params['dna'].shape)
 
   def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot_raw = F.one_hot(boards.long(), num_classes=3)
     boards_onehot = boards_onehot_raw.clone()
     noise = 0.5 * torch.ones((boards.shape[0], NOISE_SIZE), device=boards.device)
-    noise[~self.perfect,:] = noise[~self.perfect,:].uniform_(0, 1)
     noise[:,-NOISE_SIZE] = (current_player*torch.ones_like(noise[:,-1]) - 1.5)
 
     inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), noise], dim=1)
@@ -312,14 +269,7 @@ class Players():
     dna_by_gene = self.params['dna'].reshape(self.bs, GENE_J, GENE_I, GENE_SIZE)
     state = self.run_dna(dna_by_gene, state)
 
-    moves = torch.clone(state[:,-BOARD_SIZE:])# * 20 * torch.clip(torch.sigmoid(self.params['fake_mutation'].sum(dim=1)/10)[:,None], 1/20, 1)
-    probs = F.softmax(3*moves, dim=1)
-    moves = probs
-    #sampled_indices = torch.multinomial(probs, num_samples=1)
-    #moves = F.one_hot(sampled_indices.squeeze(1), num_classes=moves.size(1)).float()
-    #moves = F.softmax(moves, dim=1)
-    #moves = moves * torch.rand_like(moves)
-    
+    moves = torch.clone(state[:,-BOARD_SIZE:])
     if not test:
       moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.003).float()
     return moves
@@ -429,11 +379,6 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   params['mutation_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['fake_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
 
-    
-  perfect_params = pickle.load(open('perfect_dna.pkl', 'rb'))
-  perfect_params['dna'] = torch.zeros((BATCH_SIZE, GENE_SIZE*GENE_N), dtype=torch.float, device=DEVICE)
-  perfect_players = Players.from_params(perfect_params, bs=BATCH_SIZE, device=DEVICE)
-  perfect_players.perfect = torch.ones(BATCH_SIZE, device=DEVICE, dtype=torch.bool)
 
   players = Players(params)
   players.credits = torch.ones((BATCH_SIZE*2,), device=DEVICE) * INIT_CREDS
@@ -485,16 +430,13 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
       writer.add_scalar('x_win_rate', ((games.winners == PLAYERS.X) & (games.illegal_movers != PLAYERS.O)).sum()/BATCH_SIZE, step)
 
       print(f'Average total moves: {games.total_moves:.2f}')
-      print(f'Avg softmax scale {(torch.sigmoid(a_players.params["fake_mutation"].sum(dim=1)/10)*20).mean().item()}')
       writer.add_scalar('total_moves', games.total_moves, step)
       writer.add_scalar('avg_log_mutuation', mut_rate, step)
       writer.add_scalar('avg_trans_log_mutuation', trans_mut_rate, step)
       writer.add_scalar('draw_rate',(a_wins == b_wins).float().mean(), step)
-      writer.add_scalar('first_move_optimal',(games.first_move_optimal).float().mean(), step)
-
-    if step % 100 == 0:
       string = f'swizzling took {1000*(t4-t3):.2f}ms, playing took {1000*(t2-t1):.2f}ms, mating took {1000*(t3-t2):.2f}ms'
       pbar.set_description(string)
+
     if step % 1000 == 0:
       print('Saving...')
       pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
@@ -502,16 +444,6 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
       val_percentage = validate_model(a_players, perfect_dataset)
       writer.add_scalar('validation_good_moves_percentage', val_percentage, step)
       print(f'Validation at step {step}: {val_percentage:.2f}% good moves')
-
-      #a_games = Games(bs=BATCH_SIZE, device=DEVICE)
-      #play_games(a_games, a_players, perfect_players, test=True)
-      #b_games = Games(bs=BATCH_SIZE, device=DEVICE)
-      #play_games(b_games, perfect_players, b_players, test=True)
-      
-      #perfect_total_moves = (a_games.total_moves + b_games.total_moves)/2
-      #print(f'Vs perfect player avg total moves: {perfect_total_moves:.2f}')
-      #writer.add_scalar('avg_moves_vs_perfect_player', perfect_total_moves, step)
-
   writer.close()
   
 if __name__ == '__main__':
