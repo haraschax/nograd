@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 import pickle
+import os
 import torch
 import math
+from tqdm import tqdm
 import numpy as np
 torch.set_grad_enabled(False)
 import torch.nn.functional as F
@@ -21,7 +23,7 @@ OUTPUT_DIM = EMBED_N * BOARD_SIZE
 STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 0
-CORE_SIZE = 8
+CORE_SIZE = 2
 GENE_I = 64
 GENE_J = 4
 GENE_N = GENE_I * GENE_J
@@ -32,6 +34,124 @@ GENE_SIZE = CORE_SIZE*2 + 2
 DNA_SIZE = GENE_N * GENE_SIZE
 
 DEVICE = 'cuda'
+
+
+def is_winner(board, player):
+    return (np.any(np.all(board == player, axis=1)) or
+            np.any(np.all(board == player, axis=0)) or
+            np.all(np.diag(board) == player) or
+            np.all(np.diag(np.fliplr(board)) == player))
+
+def is_draw(board):
+    return not np.any(board == 0)
+
+def generate_valid_boards(current_board, player, all_boards, board_hashes):
+    board_hash = current_board.tobytes()
+    if board_hash in board_hashes:
+        return
+    if is_winner(current_board, PLAYERS.X) or is_winner(current_board, PLAYERS.O) or is_draw(current_board):
+        return
+    board_hashes.add(board_hash)
+    all_boards.append(current_board.copy())
+    for i in range(3):
+        for j in range(3):
+            if current_board[i, j] == 0:
+                current_board[i, j] = player
+                generate_valid_boards(current_board, next_player(player), all_boards, board_hashes)
+                current_board[i, j] = 0
+
+def get_optimal_move(board, player):
+    assert not is_winner(board, PLAYERS.X)
+    assert not is_winner(board, PLAYERS.O)
+    assert not is_draw(board)
+    best_score = -np.inf
+    best_move = None
+    for i in range(3):
+        for j in range(3):
+            if board[i, j] == PLAYERS.NONE:
+                board[i, j] = player
+                if is_winner(board, player):
+                    score = 1
+                elif is_draw(board):
+                    score = 0
+                else:
+                    _, score = get_optimal_move(board, next_player(player))
+                    score = -score
+                if score > best_score:
+                    best_score = score
+                    best_move = (i, j)
+                board[i, j] = PLAYERS.NONE
+    return best_move, best_score
+
+def get_score(board, player):
+    if is_winner(board, player):
+      return 1
+    elif is_draw(board):
+      return 0
+    elif is_winner(board, next_player(player)):
+      return -1
+    best_score = -np.inf
+    for i in range(3):
+        for j in range(3):
+            if board[i, j] == PLAYERS.NONE:
+                board[i, j] = player
+                if is_winner(board, player):
+                    score = 1
+                elif is_draw(board):
+                    score = 0
+                else:
+                    _, score = get_optimal_move(board, next_player(player))
+                    score = -score
+                best_score = max(best_score, score)
+                board[i, j] = PLAYERS.NONE
+    return best_score
+
+def generate_perfect_moves():
+    all_boards = []
+    board_hashes = set()
+    initial_board = np.zeros((3, 3), dtype=int)
+    generate_valid_boards(initial_board, PLAYERS.X, all_boards, board_hashes)
+    board_move_pairs = []
+    for board in tqdm(all_boards):
+        player = PLAYERS.O if np.sum(board == PLAYERS.X) > np.sum(board == PLAYERS.O) else PLAYERS.X
+        move, _ = get_optimal_move(board, player)
+        board_move_pairs.append((board, move, player))
+    return board_move_pairs
+
+def validate_model(player_instance, perfect_dataset):
+    """
+    For every board in the perfect dataset, obtain the player's chosen move,
+    compute the resulting board score using get_optimal_move, and compare it
+    to the score of the perfect move. Returns the percentage of moves that
+    match the perfect score.
+    """
+
+    player = Players(splice_params(player_instance.params, [0]))
+    good_moves = 0
+    total = 0
+    for board, perfect_move, perfect_player in tqdm(perfect_dataset):
+        current_player = perfect_player
+        board_tensor = torch.tensor(board.flatten(), dtype=torch.int64, device=DEVICE).unsqueeze(0)
+        with torch.no_grad():
+            model_move_probs = player.play(board_tensor, test=True, current_player=current_player)
+            move_index = torch.argmax(model_move_probs, dim=1).item()
+        row, col = move_index // 3, move_index % 3
+        score_before = get_score(board.copy(), current_player)
+
+        board_after = board.copy()
+        if board_after[row, col] == PLAYERS.NONE:
+          board_after[row, col] = current_player
+          score_after = -get_score(board_after.copy(), next_player(current_player))
+        else:
+          score_after = -1
+        
+        assert score_after <= score_before
+        if score_after >= score_before:
+            good_moves += 1
+        total += 1
+    print(good_moves, total)
+    return 100.0 * good_moves / total if total > 0 else 0.0
+
 
 def check_winner(board, conv_layer):
     board_tensor = board.float().unsqueeze(1)
@@ -323,6 +443,11 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   import tqdm
   pbar = tqdm.tqdm(range(5000000))
   a_players, b_players = swizzle_players(players, bs=BATCH_SIZE)
+  if os.path.isfile('perfect_moves.pkl'):
+    perfect_dataset = pickle.load(open('perfect_moves.pkl', 'rb'))
+  else:
+    perfect_dataset = generate_perfect_moves()
+  pickle.dump(perfect_dataset, open('perfect_moves.pkl', 'wb'))
 
   for step in pbar:
     
@@ -373,6 +498,11 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
     if step % 1000 == 0:
       print('Saving...')
       pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
+      # Run the validation: check what percentage of moves are as good as the perfect move.
+      val_percentage = validate_model(a_players, perfect_dataset)
+      writer.add_scalar('validation_good_moves_percentage', val_percentage, step)
+      print(f'Validation at step {step}: {val_percentage:.2f}% good moves')
+
       #a_games = Games(bs=BATCH_SIZE, device=DEVICE)
       #play_games(a_games, a_players, perfect_players, test=True)
       #b_games = Games(bs=BATCH_SIZE, device=DEVICE)
@@ -385,7 +515,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
   writer.close()
   
 if __name__ == '__main__':
-  for i in range(115,2000):
+  for i in range(116,2000):
     bs = 10000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
