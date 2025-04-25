@@ -24,13 +24,13 @@ OUTPUT_DIM = EMBED_N * BOARD_SIZE
 STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 0
-CORE_SIZE = 2
+CORE_SIZE = 1
 GENE_I = 128
 GENE_J = 32
 GENE_N = GENE_I * GENE_J
 STATE_SIZE = 128
 BOOLS_SIZE = 3
-GENE_SIZE = BOOLS_SIZE#CORE_SIZE*2 + 2
+GENE_SIZE = BOOLS_SIZE + GENE_MUTATION_SIZE
 
 DNA_SIZE = GENE_N * GENE_SIZE
 
@@ -283,11 +283,11 @@ class Players():
     else:
       self.perfect_dataset = generate_perfect_moves()
 
+
   def run_dna(self, dna_by_gene, input_vector):
     dna_gene_batched = rearrange(dna_by_gene, 'b i j x-> (b i) j x')
     for i in range(dna_gene_batched.shape[1]):
       state_expanded = torch.zeros((self.bs * GENE_I, STATE_SIZE), device=input_vector.device)
-      #rint(dna_gene_batched.shape, i)
 
       idx_in_a = ((dna_gene_batched[:, i, 0]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
       idx_in_b = ((dna_gene_batched[:, i, 1]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
@@ -316,35 +316,6 @@ class Players():
       input_vector += state_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1).bool().float()
     return input_vector
 
-  '''
-  def run_dna(self, dna_by_gene, input_vector):
-    input_clone = input_vector.clone()
-    input_vector = input_vector.to(dtype=torch.bool)
-    if self.weights is None:
-      self.weights = torch.zeros((self.bs, GENE_I, GENE_J, STATE_SIZE), device=self.params['dna'].device)
-      self.out_proj = torch.zeros((self.bs, GENE_I, GENE_J, STATE_SIZE), device=self.params['dna'].device)
-      self.bias = dna_by_gene[:, :, :, CORE_SIZE*2 + 1:CORE_SIZE*2+2]
-      for i in range(dna_by_gene.shape[1]):
-        in_idxs = (((dna_by_gene[:, i, :, :CORE_SIZE] + 1.0)*0.5) * STATE_SIZE).to(dtype=torch.int64)
-        out_idxs = (((dna_by_gene[:, i, :, CORE_SIZE*2:CORE_SIZE*2+1] + 1.0)*0.5) * STATE_SIZE).to(dtype=torch.int64)
-        #out_val = dna_by_gene[:, i, :, CORE_SIZE*2+1:CORE_SIZE*2+2]
-        #val = dna_by_gene[:, i, :, CORE_SIZE:CORE_SIZE*2]
-        self.weights[:,i].scatter_(2, in_idxs, 1.0)
-        self.out_proj[:,i].scatter_(2, out_idxs, 1.0)
-    for i in range(dna_by_gene.shape[1]):
-      x = (self.weights[:,i]*input_vector[:,None,:]).sum(dim=2, keepdim=True)
-      print(x)
-      x = x + self.bias[:,i]
-      x = torch.relu(x)
-      x = x * self.out_proj[:,i]
-      x = x.sum(dim=1)
-      input_vector = x
-      #input_vector += torch.relu(torch.sign(((self.weights[:,i]*input_vector[:,None,:]).sum(dim=2, keepdim=True)*self.out_proj[:,i]).sum(dim=1)))
-      #input_vector += (torch.relu((self.bias[:,i] + (self.weights[:,i]*input_vector[:,None,:]).sum(dim=2, keepdim=True)))*self.out_proj[:,i]).sum(dim=1)
-      #input_vector = torch.nn.functional.layer_norm(input_vector, (STATE_SIZE,))
-      input_vector[:,:31] = input_clone[:,:31]
-    return input_vector
-  '''
 
   def embryogenesis(self):
     mut_mut_logit = self.params['mutation_mutation'].sum(dim=1)
@@ -353,6 +324,7 @@ class Players():
     trans_mut_logit = self.params['trans_mutation'].sum(dim=1)
     # Divide by 2, since we never want to trans more than 50%     
     self.trans_mutation = torch.torch.sigmoid(trans_mut_logit) / 2
+    #self.trans_mutation[:] = 1e-12
 
     mut_logit = self.params['mutation'].sum(dim=1)
     self.mutation = torch.torch.sigmoid(mut_logit)
@@ -426,19 +398,19 @@ class Players():
     self.embryogenesis()
 
 
-    #new_params = {k:v.clone() for k,v in self.params.items()}
-    #indices = torch.randperm(len(can_mate))
-    #trans_mut_rates = self.trans_mutation[:,None].clone()
-    #mix_mutation = (torch.rand_like(self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))[:,:,0]) < trans_mut_rates)[:,:,None].float()
-    #pre_mixed_params = self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))
-    #new_params['dna'][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate]).reshape((-1, GENE_N*GENE_SIZE))
-
     new_params = {k:v.clone() for k,v in self.params.items()}
     indices = torch.randperm(len(can_mate))
-    trans_mut_rates = self.trans_mutation[:,None].expand((-1, GENE_I)).clone()
-    mix_mutation = (torch.rand_like(self.params['dna'].reshape((self.bs, GENE_I, GENE_SIZE*GENE_J))[:,:,0]) < trans_mut_rates)[:,:,None].float()
-    pre_mixed_params = self.params['dna'].reshape((self.bs, GENE_I, GENE_SIZE*GENE_J))
+    trans_mut_rates = self.trans_mutation[:,None].clone()
+    mix_mutation = (torch.rand_like(self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))[:,:,0]) < trans_mut_rates)[:,:,None].float()
+    pre_mixed_params = self.params['dna'].reshape((self.bs, GENE_N, GENE_SIZE))
     new_params['dna'][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate]).reshape((-1, GENE_N*GENE_SIZE))
+
+    #new_params = {k:v.clone() for k,v in self.params.items()}
+    #indices = torch.randperm(len(can_mate))
+    #trans_mut_rates = self.trans_mutation[:,None].expand((-1, GENE_I)).clone()
+    #mix_mutation = (torch.rand_like(self.params['dna'].reshape((self.bs, GENE_I, GENE_SIZE*GENE_J))[:,:,0]) < trans_mut_rates)[:,:,None].float()
+    #pre_mixed_params = self.params['dna'].reshape((self.bs, GENE_I, GENE_SIZE*GENE_J))
+    #new_params['dna'][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate]).reshape((-1, GENE_N*GENE_SIZE))
 
 
     for key in self.params:
@@ -593,6 +565,6 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
 
 if __name__ == '__main__':
   for i in range(11,2000):
-    bs = 1000
+    bs = 5000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
