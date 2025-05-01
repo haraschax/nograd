@@ -19,7 +19,7 @@ INIT_CREDS = 1
 EMBED_N = 128
 NOISE_SIZE = 4
 MUTATION_PARAMS_SIZE = 50
-INPUT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * EMBED_N
+INPUT_DIM = INPUT_DIM = 32
 OUTPUT_DIM = EMBED_N * BOARD_SIZE
 STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
@@ -30,7 +30,7 @@ GENE_J = 32
 GENE_N = GENE_I * GENE_J
 STATE_SIZE = 128
 BOOLS_SIZE = 3
-GENE_SIZE = BOOLS_SIZE + GENE_MUTATION_SIZE
+GENE_SIZE = BOOLS_SIZE + GENE_MUTATION_SIZE + 4
 
 DNA_SIZE = GENE_N * GENE_SIZE
 
@@ -285,13 +285,21 @@ class Players():
 
 
   def run_dna(self, dna_by_gene, input_vector):
+    #input_vector = input_vector.clone().bool() 
+    input_clone = input_vector.clone()
     dna_gene_batched = rearrange(dna_by_gene, 'b i j x-> (b i) j x')
+    state_expanded = input_vector.reshape((-1, 1, STATE_SIZE)).repeat(1, GENE_I, 1).reshape((-1, STATE_SIZE))
+
     for i in range(dna_gene_batched.shape[1]):
-      state_expanded = torch.zeros((self.bs * GENE_I, STATE_SIZE), device=input_vector.device)
 
       idx_in_a = ((dna_gene_batched[:, i, 0]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
       idx_in_b = ((dna_gene_batched[:, i, 1]/2 + 0.5) * (STATE_SIZE - CORE_SIZE + 1)).to(dtype=torch.long)
-      out_idx = ((dna_gene_batched[:, i, 2]/2 + 0.5) * (STATE_SIZE - 31)).to(dtype=torch.long) + 31
+      out_idx = ((dna_gene_batched[:, i, 2]/2 + 0.5) * (STATE_SIZE)).to(dtype=torch.long)
+      
+      a_weights = dna_gene_batched[:, i, 3]
+      b_weights = dna_gene_batched[:, i, 4]
+      out_weights = dna_gene_batched[:, i, 5]
+      bias = dna_gene_batched[:, i, 6]
 
       B = self.bs * GENE_I
       device = input_vector.device
@@ -301,20 +309,25 @@ class Players():
       a_cols = idx_in_a.unsqueeze(1) + rel_idx     # Shape: [B, CORE_SIZE]
       b_cols = idx_in_b.unsqueeze(1) + rel_idx     # Shape: [B, CORE_SIZE]
       batch_idx = torch.arange(B, device=device).unsqueeze(1)//GENE_I  # Shape: [B, 1]
-      batch_exapanded_idx = torch.arange(B, device=device).unsqueeze(1)  # Shape: [B, 1]
-      a = input_vector[batch_idx, a_cols]# * a_mask
-      b = input_vector[batch_idx, b_cols]# * b_mask
+      batch_expanded_idx = torch.arange(B, device=device).unsqueeze(1)
+      a = state_expanded[batch_expanded_idx, a_cols] * a_weights[:,None]
+      b = state_expanded[batch_expanded_idx, b_cols] * b_weights[:,None]
 
-      update = torch.logical_not(torch.logical_and(a, b))
+      state_expanded[batch_expanded_idx, out_cols] = out_weights[:,None] * torch.relu(a + b + bias[:,None])
+      #input_vector += state_expanded.reshape((-1, GENE_I, STATE_SIZE)).sum(dim=1)
+      #input_vector = torch.sign(input_vector)
+      
 
+      #input_vector[batch_idx, out_cols] = torch.logical_not(torch.logical_and(input_vector[batch_idx, out_cols], a))
 
-      state_expanded[batch_exapanded_idx, out_cols] = update.sum(dim=1).unsqueeze(1).float()
+      #input_vector = torch.nn.functional.torch.nn.functional.layer_norm(input_vector, (STATE_SIZE,), eps=1e-6)
+      #input_vector[:,:INPUT_DIM] = input_clone[:,:INPUT_DIM]
+    #print(state)
+    #input_vector = state_expanded.float().reshape((-1, GENE_I, 128)).sum(dim=1)
+    input_vector = state_expanded.reshape((-1, GENE_I, STATE_SIZE)).sum(dim=1)
+    #print(input_vector[0,-9:])
 
-      #print(state_expanded)
-      #print(state_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1))
-      #print(input_vector)
-      input_vector += state_expanded.reshape((self.bs, GENE_I, -1)).sum(dim=1).bool().float()
-    return input_vector
+    return input_vector#.float()
 
 
   def embryogenesis(self):
@@ -333,16 +346,19 @@ class Players():
   def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot_raw = F.one_hot(boards.long(), num_classes=3)
     boards_onehot = boards_onehot_raw.clone()
-    noise = 0.5 * torch.ones((boards.shape[0], NOISE_SIZE), device=boards.device)
-    noise[:,-NOISE_SIZE] = (current_player*torch.ones_like(noise[:,-1]) - 1.5)
+    #noise = 0.5 * torch.ones((boards.shape[0], NOISE_SIZE), device=boards.device)
+    #noise[:,-NOISE_SIZE] = (current_player*torch.ones_like(noise[:,-1]) - 1.5)
 
-    inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), noise], dim=1)
+    #inputs = torch.cat([boards_onehot.reshape((-1, BOARD_SIZE*3)), noise], dim=1)
 
 
     state = torch.zeros((self.bs, STATE_SIZE), device=boards.device)
     moves = torch.zeros((self.bs, BOARD_SIZE), device=boards.device)
-    state[:,:BOARD_SIZE*3 + NOISE_SIZE] = inputs
-    state = torch.sign(state)
+    state[:,:BOARD_SIZE*3] = boards_onehot.reshape((-1, BOARD_SIZE*3))
+    if current_player == PLAYERS.X:
+      state[:,BOARD_SIZE*3:INPUT_DIM] = 1.0
+    #state = torch.sign(state)
+    state[:,INPUT_DIM:INPUT_DIM+NOISE_SIZE] = torch.rand_like(state[:,INPUT_DIM:INPUT_DIM+NOISE_SIZE]) > 0.5
 
     dna_by_gene = self.params['dna'].reshape(self.bs, GENE_I, GENE_J, GENE_SIZE)
     state = self.run_dna(dna_by_gene, state)
@@ -478,9 +494,9 @@ def swizzle_players(players, bs=BATCH_SIZE):
   x_players.credits = players.credits[indices[:bs]]
   o_players = Players(splice_params(players.params, indices[bs:]))
   o_players.credits = players.credits[indices[bs:]]
-  #random_permute_dna = torch.randperm(GENE_J)
+  #random_permute_dna = torch.randperm(GENE_I)
   #x_players.params['dna'] = x_players.params['dna'].reshape((bs, GENE_I, GENE_J, GENE_SIZE))
-  #x_players.params['dna'] = x_players.params['dna'][:, :, random_permute_dna, :].reshape((bs, GENE_N*GENE_SIZE))
+  #x_players.params['dna'] = x_players.params['dna'][:, random_permute_dna, :, :].reshape((bs, GENE_N*GENE_SIZE))
   return x_players, o_players
 
 def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
@@ -564,7 +580,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(11,2000):
+  for i in range(24,2000):
     bs = 5000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
