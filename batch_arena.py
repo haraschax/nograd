@@ -366,8 +366,8 @@ class Players():
     state[:,:BOARD_SIZE*3] = boards_onehot.reshape((-1, BOARD_SIZE*3))
     if current_player == PLAYERS.X:
       state[:,BOARD_SIZE*3:INPUT_DIM] = 1.0
-    #state = torch.sign(state)
-    #state[:,INPUT_DIM:INPUT_DIM+NOISE_SIZE] = torch.rand_like(state[:,INPUT_DIM:INPUT_DIM+NOISE_SIZE]) > 0.5
+    state = torch.sign(state)
+    state[:,INPUT_DIM:INPUT_DIM+NOISE_SIZE] = torch.rand_like(state[:,INPUT_DIM:INPUT_DIM+NOISE_SIZE]) > 0.5
 
     dna_by_gene = self.params['dna'].reshape(self.bs, GENE_I, GENE_J, GENE_SIZE)
     state = self.run_dna(dna_by_gene, state)
@@ -379,8 +379,8 @@ class Players():
     #sampled_indices = torch.multinomial(move_probs, num_samples=1)
     #moves = F.one_hot(sampled_indices.squeeze(-1), num_classes=moves.size(1))
 
-    if not test:
-      moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.003).float()
+    #if not test:
+    #  moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.003).float()
     '''
     for i, board in enumerate(boards):
       board_np = board.cpu().numpy().reshape((3,3))
@@ -467,19 +467,9 @@ class Players():
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
   current_player = PLAYERS.X
-  first = True
   while True:
 
     moves = player_dict[current_player].play(games.boards, test=test, current_player=current_player)
-    if first:
-      max_indices = torch.argmax(moves, dim=1)
-
-      moves_one_shot = F.one_hot(max_indices, num_classes=moves.size(1)).float()
-      assert torch.all(moves_one_shot.sum(dim=1) <= 1)
-      games.first_move_optimal = (moves_one_shot == torch.tensor([1.0,-1.,1.0,
-                                                        -1.0,-1.0,-1.0,
-                                                        1.0,-1.0,1.0], device=moves_one_shot.device)).sum(dim=1).float()
-      first = False
     games.update(moves, current_player, test=test, player_dict=player_dict)
     if torch.all(games.game_over):
       break
@@ -597,7 +587,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(40,2000):
+  for i in range(41,2000):
     bs = 5000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
