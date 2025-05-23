@@ -26,15 +26,12 @@ STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 0
 CORE_SIZE = 1
-GENE_I = 16
-GENE_J = 4
+GENE_I = 128
+GENE_J = 8
 GENE_N = GENE_I * GENE_J
 STATE_SIZE = 128
 BOOLS_SIZE = 3
-LAYERS = GENE_J
-GENE_CORE_SIZE = 4
-GENE_SIZE = GENE_CORE_SIZE * STATE_SIZE * 2 + STATE_SIZE
-
+GENE_SIZE = BOOLS_SIZE + GENE_MUTATION_SIZE + 5
 
 DNA_SIZE = GENE_N * GENE_SIZE
 
@@ -292,22 +289,21 @@ class Players():
     #input_vector = input_vector.clone().bool() 
     input_vector_clone = torch.nn.functional.layer_norm(input_vector.clone(), (STATE_SIZE,))
     input_vector_clone = input_vector.clone()
-    dna = rearrange(dna_by_gene, 'b (k i j)-> (b k) i j', i=LAYERS, j=GENE_SIZE)
-    #dna = dna[:,0] #* (dna[:,1] > 0).float()
-    #debug = random.random() < 1e-3
+    dna = rearrange(dna_by_gene, 'b (k i j)-> b k i j', k=1, i=3)
+    dna = dna[:,0] #* (dna[:,1] > 0).float()
+    debug = random.random() < 1e-3
 
-    for i in range(LAYERS):
-      state_expanded = input_vector_clone.unsqueeze(1).expand((-1, GENE_I, -1)).reshape((-1, STATE_SIZE))
-      A = dna[:,i, :STATE_SIZE*GENE_CORE_SIZE].reshape((-1, STATE_SIZE, GENE_CORE_SIZE))
-      B = dna[:,i, STATE_SIZE*GENE_CORE_SIZE:2*STATE_SIZE*GENE_CORE_SIZE].reshape((-1, GENE_CORE_SIZE, STATE_SIZE))
-      c = dna[:,i, 2*STATE_SIZE*GENE_CORE_SIZE:]
-      x = torch.einsum('bji, bj->bi', A, state_expanded)
-      x = torch.einsum('bji, bj->bi', B, x)
-      x = x + c
+    for i in range(2):
+      A = dna[:,i, :STATE_SIZE*STATE_SIZE].reshape((-1, STATE_SIZE, STATE_SIZE))
+      b = dna[:,i, STATE_SIZE*STATE_SIZE:]
+      x = torch.einsum('bji, bj->bi', A, input_vector_clone)
+      x = x + b
       x = torch.relu(x)
-      x = x.reshape((-1, GENE_I, STATE_SIZE)).sum(dim=1)
+      #if debug:
+      #  print(f'layer {i} before: {x.mean():.2f}, {x.std():.2f}')
       x = torch.nn.functional.layer_norm(x, (STATE_SIZE,))
       input_vector_clone += x
+
     return input_vector_clone
 
 
@@ -355,8 +351,8 @@ class Players():
     sampled_indices = torch.multinomial(move_probs, num_samples=1)
     moves = F.one_hot(sampled_indices.squeeze(-1), num_classes=moves.size(1)).float()
 
-    if not test:
-      moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.1).float()
+    #if not test:
+    #  moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.01).float()
     '''
     for i, board in enumerate(boards):
       board_np = board.cpu().numpy().reshape((3,3))
@@ -403,15 +399,9 @@ class Players():
     for key in self.params:
       if 'trans' in key:
         continue
-      if key == 'dna':
-        mix_mutation = (torch.rand_like(self.params[key]) < trans_mut_rates).float().reshape((-1, GENE_N, GENE_SIZE))[:,:1]
-        pre_mixed_params = self.params[key].reshape((-1, GENE_N, GENE_SIZE))
-        new_params[key][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate]).reshape((-1, GENE_N*GENE_SIZE))
-      else:
-        mix_mutation = (torch.rand_like(self.params[key]) < trans_mut_rates).float()
-        pre_mixed_params = self.params[key]
-        new_params[key][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate])
-      
+      mix_mutation = (torch.rand_like(self.params[key]) < trans_mut_rates).float()
+      pre_mixed_params = self.params[key]
+      new_params[key][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate])
 
     mutation_scale = 0.1 #self.params['mutation_scale_mutation']
     scale = 0.1 #self.params['scale_mutation']
@@ -429,7 +419,7 @@ class Players():
 
         param = torch.clone(new_params[key])[can_mate]
         mutation = (torch.rand_like(param) < mutation_rate).float()
-        param = (1- mutation) * param + mutation * torch.zeros_like(param).uniform_(-1, 1)
+        param = param + mutation * torch.zeros_like(param).uniform_(-1, 1) * scale#[can_mate] 
         self.params[key][dead] = param[:len(dead)]
 
 def play_games(games, x_players, o_players, test=False):
@@ -444,12 +434,9 @@ def play_games(games, x_players, o_players, test=False):
     current_player = next_player(current_player)
   if not test:
     for player in player_dict:
-      player_dict[player].credits[(games.winners == player) & (games.illegal_movers == PLAYERS.NONE)] += 10
+      #player_dict[player].credits[(games.winners == player) & (games.illegal_movers == PLAYERS.NONE)] += 10
       player_dict[player].credits[(games.winners == player)] += 1.0
       player_dict[player].credits[games.losers == player] -= 1.0
-      # randomly kill some players
-      #random_kill = torch.rand_like(player_dict[player].credits) < 0.01
-      #player_dict[player].credits[random_kill] -= 10.0
 
 def splice_params(params, indices):
   new_params = {}
@@ -485,7 +472,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
 
   BATCH_SIZE = bs
   params = {}
-  params['dna'] = torch.zeros((BATCH_SIZE*2, GENE_I*GENE_J*GENE_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['dna'] = torch.zeros((BATCH_SIZE*2, 3*(STATE_SIZE*(STATE_SIZE+1))), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['trans_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['mutation_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
@@ -521,9 +508,9 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
     if step % 100 == 0:
       print(f'mean a_player credits: {a_players.credits.mean():2f} and mean b_player credits: {b_players.credits.mean():.2f}')
 
+    #concat_players.credits += INIT_CREDS - concat_players.credits.mean()
     t3 = time.time()
     concat_players.mate()
-    concat_players.credits += INIT_CREDS - concat_players.credits.mean()
     mut_rate = concat_players.avg_mutation()
     trans_mut_rate = concat_players.avg_trans_mutation()
     a_players, b_players = swizzle_players(concat_players, bs=BATCH_SIZE)
@@ -558,7 +545,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(207,2000):
-    bs = 4000
+  for i in range(7,2000):
+    bs = 5000
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
