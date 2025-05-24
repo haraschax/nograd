@@ -7,7 +7,7 @@ import time
 import torch
 import pickle
 from helpers import PLAYERS, BOARD_ROWS, BOARD_COLS, BOARD_SIZE
-from batch_arena import Games, Players
+from batch_arena import Games, Players, generate_perfect_moves, is_winner, is_draw
 
 # Initialize Pygame
 pygame.init()
@@ -51,6 +51,24 @@ def draw_figures(board):
 
 
 
+
+
+def get_a_perfect_move(board, player, perfect_dataset):
+  print(board.shape)
+  board = board.reshape((3,3))
+  assert not is_winner(board, PLAYERS.X)
+  assert not is_winner(board, PLAYERS.O)
+  assert not is_draw(board)
+
+  board_hash = str(board)
+  if board_hash in perfect_dataset:
+    _, move, _, _ = perfect_dataset[board_hash]
+    ret = torch.zeros((3,3), device='cuda')
+    ret[move[0], move[1]] = 1
+    return ret.reshape((1, BOARD_SIZE))
+  else:
+    raise ValueError("No perfect move found for this board state")
+
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--perfect', action='store_true', help='Play vs perfect player')
@@ -61,10 +79,16 @@ if __name__ == '__main__':
   games = Games(bs=1, device=device)
 
   if args.perfect:
-    params = pickle.load(open('perfect_dna.pkl', 'rb'))
+    if os.path.isfile('perfect_moves.pkl'):
+      perfect_dataset = pickle.load(open('perfect_moves.pkl', 'rb'))
+    else:
+      perfect_dataset = generate_perfect_moves()
   else:
     params = pickle.load(open('organic_dna.pkl', 'rb'))
-  players = Players.from_params(params, device=device)
+    players = Players.from_params(params, device=device)
+
+  def play_human():
+    pass
 
   while not games.game_over[0]:
     for event in pygame.event.get():
@@ -79,10 +103,14 @@ if __name__ == '__main__':
         move = torch.zeros((3,3), device=device)
         
         move[clicked_row, clicked_col] = 1
-        games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X)
+        games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X, test=True)
         if not games.game_over[0]:
-          move = players.play(games.boards, test=True)
-          games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.O)
+          if not args.perfect:
+            move = players.play(games.boards, test=True)
+          else:
+            move = get_a_perfect_move(games.boards[0].cpu().numpy(), PLAYERS.O, perfect_dataset)
+          games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.O, test=True)
+
 
     draw_figures(games.boards.cpu().reshape((BOARD_ROWS,BOARD_COLS)).numpy())
     pygame.display.update()
