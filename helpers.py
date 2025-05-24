@@ -8,3 +8,6 @@ BOARD_SIZE = BOARD_ROWS * BOARD_COLS
 
 def next_player(player):
   return PLAYERS.O if player == PLAYERS.X else PLAYERS.X
+
+
+

@@ -90,11 +90,6 @@ if __name__ == '__main__':
   def play_human():
     pass
 
-  #if not args.perfect:
-  #  move = players.play(games.boards, test=True)
-  #else:
-  #  move = get_a_perfect_move(games.boards[0].cpu().numpy(), PLAYERS.X, perfect_dataset)
-  #games.update(move.reshape((1,BOARD_SIZE)), PLAYERS.X, test=True)
   while not games.game_over[0]:
     for event in pygame.event.get():
       if event.type == pygame.QUIT:
