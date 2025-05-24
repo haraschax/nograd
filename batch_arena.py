@@ -425,11 +425,11 @@ def train_run(name='', bs=BATCH_SIZE):
 
     if step % 100 == 0:
       write_metrics(step, writer, games, a_players, b_players)
-      if step % 1000 == 0 and step >0:
+      if step % 1000 == 0 and step > 0:
         pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
         losing_move_ratio = get_losing_move_ratio(a_players)
         writer.add_scalar('losing_move_ratio', losing_move_ratio, step)
-        print(f'Losing move ratio at step {step}: {losing_move_ratio:.2f}% good moves')
+        print(f'Losing move ratio at step {step}: {losing_move_ratio:.2f} bad move ratio')
   writer.close()
 
 
