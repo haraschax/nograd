@@ -115,8 +115,7 @@ def generate_perfect_moves():
     board_dict = {'scores': full_board_scores, 'players': full_board_players}
     return board_dict
 
-def get_losing_move_ratio(player_instance, perfect_dataset):
-    
+def get_losing_move_ratio(player_instance):
   if os.path.isfile('perfect_moves.pkl'):
     perfect_dataset = pickle.load(open('perfect_moves.pkl', 'rb'))
   else:
