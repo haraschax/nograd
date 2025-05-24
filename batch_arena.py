@@ -299,8 +299,8 @@ class Players():
     sampled_indices = torch.multinomial(move_probs, num_samples=1)
     moves = F.one_hot(sampled_indices.squeeze(-1), num_classes=moves.size(1)).float()
 
-    if not test:
-      moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.01).float()
+    #if not test:
+    #  moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.01).float()
     return moves
 
   def mate(self, init_credits=INIT_CREDS):
@@ -315,7 +315,6 @@ class Players():
 
     self.embryogenesis()
 
-
     new_params = {k:v.clone() for k,v in self.params.items()}
     indices = torch.randperm(len(can_mate))
     trans_mut_rates = self.trans_mutation[:,None].clone()
@@ -327,12 +326,23 @@ class Players():
       new_params[key][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate])
 
     mutation_scale = 0.1 #self.params['mutation_scale_mutation']
+    scale = 0.1 #self.params['scale_mutation']
     for key in self.params:
-      mutation_rate = self.mutation_mutation.clone()[can_mate,None]
-      param = torch.clone(self.params[key])[can_mate]
-      mutation = (torch.rand_like(param) < mutation_rate).float()
-      param = param + mutation * torch.zeros_like(param).uniform_(-1, 1) * mutation_scale
-      self.params[key][dead] = param[:len(dead)]
+      if 'mutation' in key:
+        #mutation_logit = self.params['mutation_mutation'].sum(dim=1)
+        mutation_rate = self.mutation_mutation.clone()[can_mate,None]
+        param = torch.clone(self.params[key])[can_mate]
+        #param = param + torch.rand_like(param) * mutation_rate
+        mutation = (torch.rand_like(param) < mutation_rate).float()
+        param = param + mutation * torch.zeros_like(param).uniform_(-1, 1) * mutation_scale#[can_mate]
+        self.params[key][dead] = param[:len(dead)]
+      else:
+        mutation_rate = self.mutation[:,None][can_mate]
+
+        param = torch.clone(new_params[key])[can_mate]
+        mutation = (torch.rand_like(param) < mutation_rate).float()
+        param = param + mutation * torch.zeros_like(param).uniform_(-1, 1) * scale#[can_mate] 
+        self.params[key][dead] = param[:len(dead)]
 
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
