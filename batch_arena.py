@@ -27,19 +27,75 @@ BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 0
 CORE_SIZE = 1
 GENE_I = 128
-GENE_J = 8
+GENE_J = 5
 GENE_N = GENE_I * GENE_J
-STATE_SIZE = 128
+STATE_SIZE = 32
 BOOLS_SIZE = 3
-GENE_SIZE = BOOLS_SIZE + GENE_MUTATION_SIZE + 5
-LAYERS = 3
+LAYERS = GENE_J
+GENE_CORE_SIZE = 4
+GENE_SIZE = 4
 
 DNA_SIZE = GENE_N * GENE_SIZE
 OFFSPRING = 2
-GAMES_PER_MATE = 10
+GAMES_PER_MATE = 1
 
 DEVICE = 'cuda'
+LIFE_SIZE = STATE_SIZE
+#INDICES = torch.randperm(LIFE_SIZE)
+INDICES = range(LIFE_SIZE//BOARD_SIZE, LIFE_SIZE-2, LIFE_SIZE//BOARD_SIZE)
 
+FIXED_SEED_LIFE  = (torch.randn((LIFE_SIZE, LIFE_SIZE), device=DEVICE) > 0.0).bool()
+
+
+def life_step_conway(board: torch.Tensor) -> torch.Tensor:
+    kernel = torch.tensor([[1, 1, 1],
+                           [1, 0, 1],
+                           [1, 1, 1]], device=board.device, dtype=torch.float32)
+
+    padded = F.pad(board.float().unsqueeze(1),  (1, 1, 1, 1), mode='circular')
+    neighbours = F.conv2d(padded, kernel[None, None])[:,0]
+    alive       = board.bool()
+    next_board  = (neighbours == 3) | (alive & (neighbours == 2))
+    return next_board.to(board.dtype)
+
+def life_step_brians(board: torch.Tensor) -> torch.Tensor:
+    kernel = torch.tensor([[1, 1, 1],
+                           [1, 0, 1],
+                           [1, 1, 1]], device=board.device, dtype=torch.float32)
+
+    padded     = F.pad((board == 1).float().unsqueeze(1), (1, 1, 1, 1), mode='circular')
+    neighbours = F.conv2d(padded, kernel[None, None])[:, 0]
+    next_board = torch.zeros_like(board)
+
+    # Rule 1: ON → DYING
+    next_board[board == 1] = 2
+
+    # Rule 2: OFF with exactly two ON neighbours → ON
+    birth_mask = (board == 0) & (neighbours == 2)
+    next_board[birth_mask] = 1
+
+    # Rule 3 (DYING → OFF) is already satisfied by the default 0
+    return next_board
+
+
+def life_step(board: torch.Tensor) -> torch.Tensor:
+    """
+    Seeds cellular automaton.
+    Rule: a cell is born (1) iff it is currently 0 and has exactly two live neighbours;
+          all live cells die every step.
+    States: 0 = dead, 1 = live.
+    """
+    kernel = torch.tensor([[1, 1, 1],
+                           [1, 0, 1],
+                           [1, 1, 1]], device=board.device, dtype=torch.float32)
+
+    # count live neighbours with circular padding
+    padded = F.pad(board.float().unsqueeze(1), (1, 1, 1, 1), mode='circular')
+    neighbours = F.conv2d(padded, kernel[None, None])[:, 0]
+
+    # birth if exactly two neighbours; no survival
+    next_board = ((neighbours == 2) & (~board.bool())).to(board.dtype)
+    return next_board
 
 def is_winner(board, player):
     return (np.any(np.all(board == player, axis=1)) or
@@ -248,22 +304,28 @@ class Players():
 
 
   def run_dna(self, dna_by_gene, input_vector):
-    #input_vector = input_vector.clone().bool() 
+    dna = rearrange(dna_by_gene, 'b (i j k)-> b i j k', i=GENE_I, k=GENE_SIZE)
     input_vector_clone = input_vector.clone()
-    dna = rearrange(dna_by_gene, 'b (i j)-> b i j', i=LAYERS)
 
-    scales = self.scale_mutation
-    for i in range(LAYERS):
-      #input_vector_clone = torch.nn.functional.layer_norm(input_vector_clone, (STATE_SIZE,))
-      A = dna[:,i, :STATE_SIZE*STATE_SIZE].reshape((-1, STATE_SIZE, STATE_SIZE))
-      b = dna[:,i, STATE_SIZE*STATE_SIZE:]
-      x = torch.einsum('bji, bj->bi', A, input_vector_clone)
-      x = x*scales[:,i][:,None] + b*scales[:,LAYERS+i][:,None]
-      #x = x + b
-      x = torch.relu(x)
-      x = torch.nn.functional.layer_norm(x, (STATE_SIZE,))
-      input_vector_clone += x
+    life_board = torch.zeros((self.bs, LIFE_SIZE, LIFE_SIZE), device=self.device, dtype=torch.bool)
+    life_board += FIXED_SEED_LIFE[None, :, :].bool()
 
+    B, I, J, K = dna.shape
+    device   = dna.device
+    half     = LIFE_SIZE / 2
+    for j in range(J):
+      life_board = life_step(life_board)
+
+      idxs  = ((dna[:,:,j,:3] + 1) * half).long() 
+      
+      in_vals  = (input_vector_clone.gather(1, idxs[...,0])).bool()
+      batch_idx = torch.arange(B, device=device).view(-1, 1).expand(-1, I) 
+
+      life_board[batch_idx.reshape(-1),
+                 idxs[...,1].reshape(-1),
+                 idxs[...,2].reshape(-1)] = in_vals.reshape(-1)
+     
+    input_vector_clone = life_board.sum(dim=1)
     return input_vector_clone
 
   @property
@@ -278,7 +340,7 @@ class Players():
   
   @property
   def trans_mutation(self):
-    trans_mut_exp = torch.sigmoid(self.params['trans_mutation'].sum(dim=1))
+    trans_mut_exp = torch.sigmoid(self.params['trans_mutation'].sum(dim=1)/20)
     trans_mutation = 10**(-10*trans_mut_exp - 1)
     #trans_mutation[:] = 0.0
     return trans_mutation
@@ -297,17 +359,11 @@ class Players():
     state = torch.zeros((self.bs, STATE_SIZE), device=boards.device)
     state[:,:BOARD_SIZE*3] = boards_onehot.reshape((-1, BOARD_SIZE*3))
     if current_player == PLAYERS.X:
-      state[:,BOARD_SIZE*3:INPUT_DIM] = 1.0
-
+      state[:,BOARD_SIZE*3] = 1.0
+    state[:,BOARD_SIZE*3 + 1] = 1.0
     state = self.run_dna(self.params['dna'], state)
 
-    moves = torch.clone(state[:,-BOARD_SIZE:])
-    #output_scale = 10 ** (8*torch.sigmoid(self.params['output_scale_mutation']))
-    #moves = output_scale * moves
-    #moves = 10**(5*torch.sigmoid(self.params['output_scale_mutation'])) * moves
-    #move_probs = torch.softmax(moves, dim=1)
-    #sampled_indices = torch.multinomial(move_probs, num_samples=1)
-    #moves = F.one_hot(sampled_indices.squeeze(-1), num_classes=moves.size(1)).float()
+    moves = torch.clone(state[:,INDICES]).float()
 
     if not test:
       moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.01).float()
@@ -317,8 +373,8 @@ class Players():
     cred = self.params['credits']
     bs = len(cred)
     can_mate = torch.argsort(cred, descending=True)
-    print(torch.max(cred), torch.min(cred), len(can_mate), torch.mean(abs(cred).float()))
-    print(self.params['credits'][can_mate][:10], self.params['x_games'][can_mate][:10])
+    #print(torch.max(cred), torch.min(cred), len(can_mate), torch.mean(abs(cred).float()))
+    #print(self.params['credits'][can_mate][:10], self.params['x_games'][can_mate][:10])
     #print(self.credits.max().item(), self.credits.min().item(), (self.credits == self.credits.max()).sum().item(), (self.credits == self.credits.min()).sum().item())
     self.params['credits'][:] = 0
     self.params['x_games'][:] = 0
@@ -343,11 +399,10 @@ class Players():
         continue
       if 'mutation' in key:
         continue
-      mix_mutation = (torch.rand_like(self.params[key]) < trans_mut_rates).float()
-      pre_mixed_params = self.params[key]
-      self.params[key] = (pre_mixed_params  * (1 - mix_mutation) + pre_mixed_params[indices] * mix_mutation)
+      mix_mutation = (torch.rand_like(self.params[key]) < trans_mut_rates).float().reshape((-1, GENE_N, GENE_SIZE))[:,:,:1]
+      pre_mixed_params = self.params[key].reshape((-1, GENE_N, GENE_SIZE))
+      self.params[key] = (pre_mixed_params  * (1 - mix_mutation) + pre_mixed_params[indices] * mix_mutation).reshape((-1, GENE_N*GENE_SIZE))
 
-    mutation_scale = 0.1#10 ** (-10*torch.sigmoid(self.params['mutation_scale_mutation']))
     for key in self.params:
       if key in ['credits', 'x_games']:
         continue
@@ -363,6 +418,7 @@ class Players():
         mutation = (torch.rand_like(param) < mutation_rate).float()
         param = (1 - mutation) * param + mutation * torch.zeros_like(param).uniform_(-1, 1)
         self.params[key] = param
+      
 
 def play_games(games, x_players, o_players, test=False):
   player_dict = {PLAYERS.X: x_players, PLAYERS.O: o_players}
@@ -423,7 +479,7 @@ def write_metrics(step, writer, games, a_players, b_players):
 
 def init_players(bs=BATCH_SIZE):
   params = {}
-  params['dna'] = torch.zeros((bs*2, LAYERS*(STATE_SIZE*(STATE_SIZE+1))), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['dna'] = torch.zeros((bs*2, GENE_I*GENE_J*GENE_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['trans_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['mutation_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
@@ -462,7 +518,7 @@ def train_run(name='', bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(120,2000):
-    bs = 4000
+  for i in range(12,2000):
+    bs = 5000
     name = f'run_{i}'
     train_run(name=name, bs=bs)
