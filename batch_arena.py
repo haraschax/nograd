@@ -26,14 +26,12 @@ STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 0
 CORE_SIZE = 1
-GENE_I = 128
-GENE_J = 5
-GENE_N = GENE_I * GENE_J
+GENE_N = 128
 STATE_SIZE = 32
 BOOLS_SIZE = 3
-LAYERS = GENE_J
+LAYERS = 8
 GENE_CORE_SIZE = 4
-GENE_SIZE = 4
+GENE_SIZE = 6
 
 DNA_SIZE = GENE_N * GENE_SIZE
 OFFSPRING = 2
@@ -304,27 +302,39 @@ class Players():
 
 
   def run_dna(self, dna_by_gene, input_vector):
-    dna = rearrange(dna_by_gene, 'b (i j k)-> b i j k', i=GENE_I, k=GENE_SIZE)
+    dna = rearrange(dna_by_gene, 'b (i k)-> b i k', i=GENE_N, k=GENE_SIZE)
     input_vector_clone = input_vector.clone()
 
     life_board = torch.zeros((self.bs, LIFE_SIZE, LIFE_SIZE), device=self.device, dtype=torch.bool)
     life_board += FIXED_SEED_LIFE[None, :, :].bool()
 
-    B, I, J, K = dna.shape
-    device   = dna.device
-    half     = LIFE_SIZE / 2
-    for j in range(J):
+    B, I, K = dna.shape
+    device = dna.device
+    half = LIFE_SIZE / 2
+    injections = torch.zeros((B, LAYERS, LIFE_SIZE, LIFE_SIZE), dtype=torch.bool, device=device)
+    idxs = ((dna[:,:,:4] + 1) * half)
+    idxs[...,1] *= (LAYERS-1)/(LIFE_SIZE-1)
+    idxs = idxs.long()
+    in_vals = (input_vector_clone.gather(1, idxs[...,0])).bool()
+    batch_idx = torch.arange(B, device=device).view(-1, 1).expand(-1, I)
+
+    injections[batch_idx.reshape(-1),
+               idxs[...,1].reshape(-1),
+               idxs[...,2].reshape(-1),
+               idxs[...,3].reshape(-1)] = in_vals.reshape(-1)
+
+    mask = torch.zeros((B, LAYERS, LIFE_SIZE, LIFE_SIZE), dtype=torch.bool, device=device)
+    mask[batch_idx.reshape(-1),
+         idxs[...,1].reshape(-1),
+         idxs[...,2].reshape(-1),
+         idxs[...,3].reshape(-1)] = (dna[:, :, 4].reshape(-1) > 0)
+
+    if random.random() < 0.01:
+      print(idxs[...,1].float().mean(), dna[:,:, 4].float().mean())
+    for j in range(LAYERS):
       life_board = life_step(life_board)
+      life_board[mask[:,j]] = injections[:,j][mask[:,j]]
 
-      idxs  = ((dna[:,:,j,:3] + 1) * half).long() 
-      
-      in_vals  = (input_vector_clone.gather(1, idxs[...,0])).bool()
-      batch_idx = torch.arange(B, device=device).view(-1, 1).expand(-1, I) 
-
-      life_board[batch_idx.reshape(-1),
-                 idxs[...,1].reshape(-1),
-                 idxs[...,2].reshape(-1)] = in_vals.reshape(-1)
-     
     input_vector_clone = life_board.sum(dim=1)
     return input_vector_clone
 
@@ -347,9 +357,10 @@ class Players():
 
   @property
   def scale_mutation(self):
-    scales_exp = torch.tanh(self.params['scales_mutation'].reshape((-1, MUTATION_PARAMS_SIZE, LAYERS*2)).sum(dim=1))
+    scales_exp = torch.tanh(self.params['output_scale_mutation'].sum(dim=1)/20)
     scales = 10**(5*scales_exp)
     return scales
+
 
   def play(self, boards, test=False, current_player=PLAYERS.X):
     boards_onehot_raw = F.one_hot(boards.long(), num_classes=3)
@@ -364,6 +375,10 @@ class Players():
     state = self.run_dna(self.params['dna'], state)
 
     moves = torch.clone(state[:,INDICES]).float()
+    moves = moves * self.scale_mutation[:,None]
+    move_probs = torch.softmax(moves, dim=1)
+    sampled_indices = torch.multinomial(move_probs, num_samples=1)
+    moves = F.one_hot(sampled_indices.squeeze(-1), num_classes=moves.size(1)).float()
 
     if not test:
       moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.01).float()
@@ -475,16 +490,16 @@ def write_metrics(step, writer, games, a_players, b_players):
   writer.add_scalar('mutation', a_players.mutation.mean(), step)
   writer.add_scalar('mutation_mutation', a_players.mutation_mutation.mean(), step)
   writer.add_scalar('trans_mutation', a_players.trans_mutation.mean(), step)
+  writer.add_scalar('scale_mutation', a_players.scale_mutation.mean(), step)
 
 
 def init_players(bs=BATCH_SIZE):
   params = {}
-  params['dna'] = torch.zeros((bs*2, GENE_I*GENE_J*GENE_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['dna'] = torch.zeros((bs*2, GENE_N*GENE_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['trans_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['mutation_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['output_scale_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-  params['scales_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE*LAYERS*2), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
   params['credits'] = torch.zeros((bs*2), dtype=torch.long, device=DEVICE)
   params['x_games'] = torch.zeros((bs*2), dtype=torch.long, device=DEVICE)
   players = Players(params)
@@ -518,7 +533,7 @@ def train_run(name='', bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(12,2000):
+  for i in range(110,2000):
     bs = 5000
     name = f'run_{i}'
     train_run(name=name, bs=bs)
