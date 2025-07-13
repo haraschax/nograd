@@ -16,7 +16,7 @@ from einops import rearrange
 
 MAX_MOVES = 10
 BATCH_SIZE = 10
-INIT_CREDS = 1
+INIT_CREDS = 0
 EMBED_N = 128
 NOISE_SIZE = 4
 MUTATION_PARAMS_SIZE = 100
@@ -26,19 +26,27 @@ STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 0
 CORE_SIZE = 1
-GENE_I = 16
+GENE_I = 64
 GENE_J = 4
 GENE_N = GENE_I * GENE_J
 STATE_SIZE = 128
 BOOLS_SIZE = 3
-LAYERS = GENE_J
-GENE_CORE_SIZE = 4
-GENE_SIZE = GENE_CORE_SIZE * STATE_SIZE * 2 + STATE_SIZE
+LAYERS = 4
+PROTEIN_N = 8
+GENE_SIZE = PROTEIN_N * 3 + 2 
+
+DNA_SIZE = GENE_N * GENE_SIZE
+OFFSPRING = 2
+GAMES_PER_MATE = 1
 
 
 DNA_SIZE = GENE_N * GENE_SIZE
 
 DEVICE = 'cuda'
+
+def quantize(x, N):
+  x = (x + 1.0) / 2
+  return torch.round(x * N).long()
 
 
 def is_winner(board, player):
@@ -287,25 +295,27 @@ class Players():
 
 
   def run_dna(self, dna_by_gene, input_vector):
-    #input_vector = input_vector.clone().bool() 
-    input_vector_clone = torch.nn.functional.layer_norm(input_vector.clone(), (STATE_SIZE,))
-    input_vector_clone = input_vector.clone()
-    dna = rearrange(dna_by_gene, 'b (k i j)-> (b k) i j', i=LAYERS, j=GENE_SIZE)
-    #dna = dna[:,0] #* (dna[:,1] > 0).float()
-    #debug = random.random() < 1e-3
+    dna_by_gene = dna_by_gene.reshape((self.bs * GENE_I, GENE_J, GENE_SIZE))
+    input_vector_clone = input_vector.bool().clone()
+    device = input_vector.device
+    B = self.bs * GENE_I
+    batch_idx = torch.arange(B, device=device)//GENE_I
 
-    for i in range(LAYERS):
-      state_expanded = input_vector_clone.unsqueeze(1).expand((-1, GENE_I, -1)).reshape((-1, STATE_SIZE))
-      A = dna[:,i, :STATE_SIZE*GENE_CORE_SIZE].reshape((-1, STATE_SIZE, GENE_CORE_SIZE))
-      B = dna[:,i, STATE_SIZE*GENE_CORE_SIZE:2*STATE_SIZE*GENE_CORE_SIZE].reshape((-1, GENE_CORE_SIZE, STATE_SIZE))
-      c = dna[:,i, 2*STATE_SIZE*GENE_CORE_SIZE:]
-      x = torch.einsum('bji, bj->bi', A, state_expanded)
-      x = torch.einsum('bji, bj->bi', B, x)
-      x = x + c
-      x = torch.relu(x)
-      x = x.reshape((-1, GENE_I, STATE_SIZE)).sum(dim=1)
-      x = torch.nn.functional.layer_norm(x, (STATE_SIZE,))
-      input_vector_clone += x
+    for i in range(dna_by_gene.shape[1]):
+      valid = torch.ones((self.bs * GENE_I), device=input_vector.device, dtype=torch.bool)
+      for l in range(PROTEIN_N):
+        gidx = l*3
+        idx_in = quantize(dna_by_gene[:, i, gidx], STATE_SIZE -1)
+        val = dna_by_gene[:, i, gidx + 1] > 0
+        mask = (dna_by_gene[:, i, gidx + 2].reshape((self.bs, GENE_I)) > 0).flatten()
+        valid = valid & (mask | (val == input_vector_clone[batch_idx, idx_in]))
+      val_out = (dna_by_gene[:, i, -2] > 0).reshape((self.bs, -1))
+      idx_out = quantize(dna_by_gene[:, i, -1], STATE_SIZE -1).reshape((self.bs, -1))
+      valid = valid.reshape((self.bs, GENE_I))
+      valid_batch_idx = torch.nonzero(valid, as_tuple=True)[0]
+      indices_to_update = idx_out[valid]
+      values_to_set = val_out[valid].bool()
+      input_vector_clone[valid_batch_idx, indices_to_update] = values_to_set
     return input_vector_clone
 
 
@@ -359,14 +369,8 @@ class Players():
     state = self.run_dna(self.params['dna'], state)
 
     moves = torch.clone(state[:,-BOARD_SIZE:])
-    #print(moves.max(), moves.min())
-
-    #moves[moves < 0] = -1e12
     moves = self.output_scale_mutation[:,None] * moves
-    #if random.random() < 1e-3:
-    #  print('output scale mean: ',self.params['output_scale_mutation'].mean().cpu().item())
     move_probs = torch.softmax(moves, dim=1)
-
     sampled_indices = torch.multinomial(move_probs, num_samples=1)
     moves = F.one_hot(sampled_indices.squeeze(-1), num_classes=moves.size(1)).float()
 
@@ -417,7 +421,7 @@ class Players():
       if 'trans' in key:
         continue
       if key == 'dna':
-        mix_mutation = (torch.rand_like(self.params[key]) < trans_mut_rates).float().reshape((-1, GENE_N, GENE_SIZE))[:,:1]
+        mix_mutation = (torch.rand_like(self.params[key]) < trans_mut_rates).float().reshape((-1, GENE_N, GENE_SIZE))[:,:,:1]
         pre_mixed_params = self.params[key].reshape((-1, GENE_N, GENE_SIZE))
         new_params[key][can_mate] = (pre_mixed_params[can_mate]  * (1 - mix_mutation[can_mate]) + pre_mixed_params[can_mate][indices] * mix_mutation[can_mate]).reshape((-1, GENE_N*GENE_SIZE))
       else:
@@ -511,7 +515,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
 
   import time
   import tqdm
-  pbar = tqdm.tqdm(range(5000000))
+  pbar = tqdm.tqdm(range(50000))
   a_players, b_players = swizzle_players(players, bs=BATCH_SIZE)
 
   for step in pbar:
@@ -569,7 +573,7 @@ def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(400,2000):
+  for i in range(600,2000):
     bs = 3500
     name = f'run_{i}'
     train_run(name=name, embed_n=EMBED_N, bs=bs)
