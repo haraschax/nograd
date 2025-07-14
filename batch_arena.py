@@ -4,7 +4,7 @@ import os
 import torch
 import math
 import random
-from tqdm import tqdm
+import tqdm
 import numpy as np
 torch.set_grad_enabled(False)
 import torch.nn.functional as F
@@ -132,52 +132,41 @@ def generate_perfect_moves():
     #board_dict = {str(k): (k, move, player, score) for k,move,player,score in board_move_pairs}
     return board_dict
 
-def validate_model(player_instance, perfect_dataset):
-    """
-    For every board in the perfect dataset, obtain the player's chosen move,
-    compute the resulting board score using get_optimal_move, and compare it
-    to the score of the perfect move. Returns the percentage of moves that
-    match the perfect score.
-    """
+def get_losing_move_ratio(player_instance):
+  if os.path.isfile('perfect_moves.pkl'):
+    perfect_dataset = pickle.load(open('perfect_moves.pkl', 'rb'))
+  else:
+    perfect_dataset = generate_perfect_moves()
+    pickle.dump(perfect_dataset, open('perfect_moves.pkl', 'wb'))
+  test_player = Players(splice_params(player_instance.params, [0]))
+  losing_moves = 0
+  total = 0
+  for board in tqdm.tqdm(get_all_valid_boards()):
+    if is_winner(board, PLAYERS.X) or is_winner(board, PLAYERS.O) or is_draw(board):
+      continue
+    current_player, score_before = perfect_dataset['players'][unique_int_from_board(board)], perfect_dataset['scores'][unique_int_from_board(board)]
+    board_tensor = torch.tensor(board.flatten(), dtype=torch.int64, device=DEVICE).unsqueeze(0)
+    model_move_probs = test_player.play(board_tensor, test=True, current_player=current_player)
+    move_index = torch.argmax(model_move_probs, dim=1).item()
+    row, col = move_index // 3, move_index % 3
 
-    test_player = Players(splice_params(player_instance.params, [0]))
-    good_moves = 0
-    total = 0
-    for board in tqdm(get_all_valid_boards()):
-        if is_winner(board, PLAYERS.X) or is_winner(board, PLAYERS.O) or is_draw(board):
-            continue
-        #board, move, current_player, score_before = v
-        current_player, score_before = perfect_dataset['players'][unique_int_from_board(board)], perfect_dataset['scores'][unique_int_from_board(board)]
-        board_tensor = torch.tensor(board.flatten(), dtype=torch.int64, device=DEVICE).unsqueeze(0)
-        with torch.no_grad():
-            model_move_probs = test_player.play(board_tensor, test=True, current_player=current_player)
-            move_index = torch.argmax(model_move_probs, dim=1).item()
-        row, col = move_index // 3, move_index % 3
-
-        board_after = board.copy()
-        if board_after[row, col] == PLAYERS.NONE:
-          board_after[row, col] = current_player
-          if is_winner(board_after, current_player):
-            score_after = 1
-          elif is_draw(board_after):
-            score_after = 0
-          else:
-            s = perfect_dataset['scores'][unique_int_from_board(board_after)] #perfect_dataset[str(board_after)]
-            score_after = -s
-        else:
-          score_after = -1
-        
-        #print(board, move_index, score_before, score_after, current_player)
-        #assert score_after <= score_before
-        if score_after >= score_before:
-            good_moves += 1
-        else:
-            #print(f"Player {current_player} won with score {score_after}")
-            #print(board, move_index, score_before, score_after, current_player)
-            pass
-        total += 1
-    return 100.0 * good_moves / total
-
+    board_after = board.copy()
+    if board_after[row, col] == PLAYERS.NONE:
+      board_after[row, col] = current_player
+      if is_winner(board_after, current_player):
+        score_after = 1
+      elif is_draw(board_after):
+        score_after = 0
+      else:
+        s = perfect_dataset['scores'][unique_int_from_board(board_after)]
+        score_after = -s
+    else:
+      score_after = -1
+    
+    if score_after < score_before:
+        losing_moves += 1
+    total += 1
+  return losing_moves / total
 
 def check_winner(board, conv_layer):
     board_tensor = board.float().unsqueeze(1)
@@ -287,6 +276,7 @@ class Players():
     self.device = params['dna'].device
     self.params = params
     self.weights = None
+    self.credits = torch.zeros((self.bs,), dtype=torch.float, device=self.device)
 
     if os.path.isfile('perfect_moves.pkl'):
       self.perfect_dataset = pickle.load(open('perfect_moves.pkl', 'rb'))
@@ -322,7 +312,8 @@ class Players():
   @property
   def mutation_mutation(self):
     mut_mut_exp = torch.sigmoid(self.params['mutation_mutation'].sum(dim=1)/20)
-    return 10**(-10*mut_mut_exp)
+    #return 10**(-10*mut_mut_exp)
+    return 1e-3 * torch.ones_like(mut_mut_exp)
 
   @property
   def mutation(self):
@@ -478,102 +469,79 @@ def concat_params(params1, params2, slc1=slice(0,None), slc2=slice(0,None)):
     new_params[key] = torch.cat([params1[key][slc1], params2[key][slc2]])
   return new_params
 
-def swizzle_players(players, bs=BATCH_SIZE):
+def swizzle_players(players):
+  bs = players.params['dna'].shape[0] // 2
   indices = torch.randperm(bs*2)
   x_players = Players(splice_params(players.params, indices[:bs]))
   x_players.credits = players.credits[indices[:bs]]
   o_players = Players(splice_params(players.params, indices[bs:]))
-  o_players.credits = players.credits[indices[bs:]]
-  #random_permute_dna = torch.randperm(GENE_I)
-  #x_players.params['dna'] = x_players.params['dna'].reshape((bs, GENE_I, GENE_J, GENE_SIZE))
-  #x_players.params['dna'] = x_players.params['dna'][:, random_permute_dna, :, :].reshape((bs, GENE_N*GENE_SIZE))
+  o_players.credits =players.credits[indices[bs:]]
   return x_players, o_players
 
-def train_run(name='', embed_n=EMBED_N, bs=BATCH_SIZE):
-  if os.path.isfile('perfect_moves.pkl'):
-    perfect_dataset = pickle.load(open('perfect_moves.pkl', 'rb'))
-  else:
-    perfect_dataset = generate_perfect_moves()
-  pickle.dump(perfect_dataset, open('perfect_moves.pkl', 'wb'))
+def concat_players(a_players, b_players):
+  players = Players(concat_params(a_players.params, b_players.params))
+  players.credits = torch.cat([a_players.credits, b_players.credits])
+  return players
+
+def write_metrics(step, writer, games, a_players, b_players):
+  bs = a_players.params['dna'].shape[0]
+  games_val = Games(bs=bs)
+  play_games(games_val, a_players, b_players, test=True)
+
+  writer.add_scalar('total_moves_val', games_val.total_moves, step)
+  assert ((games.illegal_movers != games.winners) | (games._total_moves == 9)).all()
+  writer.add_scalar('o_illegal_move_rate', (games.illegal_movers == PLAYERS.O).sum()/bs, step)
+  writer.add_scalar('x_illegal_move_rate', (games.illegal_movers == PLAYERS.X).sum()/bs, step)
+  writer.add_scalar('o_win_rate', ((games.winners == PLAYERS.O) & (games.illegal_movers != PLAYERS.X)).sum()/bs, step)
+  writer.add_scalar('x_win_rate', ((games.winners == PLAYERS.X) & (games.illegal_movers != PLAYERS.O)).sum()/bs, step)
+  writer.add_scalar('total_moves', games.total_moves, step)
+  writer.add_scalar('draw_rate',(games.winners == PLAYERS.NONE).float().mean(), step)
+  writer.add_scalar('mutation', a_players.mutation.mean(), step)
+  writer.add_scalar('mutation_mutation', a_players.mutation_mutation.mean(), step)
+  writer.add_scalar('trans_mutation', a_players.trans_mutation.mean(), step)
+  writer.add_scalar('output_scale_mutation', a_players.output_scale_mutation.mean(), step)
+
+
+def init_players(bs=BATCH_SIZE):
+  params = {}
+  params['dna'] = torch.zeros((bs*2, GENE_N*GENE_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['trans_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['mutation_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['output_scale_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  params['scales_mutation'] = torch.zeros((bs*2, MUTATION_PARAMS_SIZE*LAYERS*2), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
+  players = Players(params)
+  return players
+
+def train_run(name='', bs=BATCH_SIZE):
 
   writer = SummaryWriter(f'runs/{name}')
+  players = init_players(bs=bs)
 
-  BATCH_SIZE = bs
-  params = {}
-  params['dna'] = torch.zeros((BATCH_SIZE*2, GENE_I*GENE_J*GENE_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-  params['mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-  params['trans_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-  params['mutation_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-  params['output_scale_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-  params['scale_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-  params['mutation_scale_mutation'] = torch.zeros((BATCH_SIZE*2, MUTATION_PARAMS_SIZE), dtype=torch.float, device=DEVICE).uniform_(-1, 1)
-
-
-  players = Players(params)
-  players.credits = torch.ones((BATCH_SIZE*2,), device=DEVICE) * INIT_CREDS
-
-
-  import time
-  import tqdm
   pbar = tqdm.tqdm(range(50000))
-  a_players, b_players = swizzle_players(players, bs=BATCH_SIZE)
 
   for step in pbar:
-    
-    t1 = time.time()
-    a_wins = torch.zeros((BATCH_SIZE,), dtype=torch.int8, device=DEVICE)
-    b_wins = torch.zeros((BATCH_SIZE,), dtype=torch.int8, device=DEVICE)
+    for _ in range(GAMES_PER_MATE):
+      a_players, b_players = swizzle_players(players)
+      games = Games(bs=bs)
+      play_games(games, a_players, b_players)
+      players = concat_players(a_players, b_players)
+    players.mate()
 
-    games = Games(bs=BATCH_SIZE, perfect_dataset=perfect_dataset)
-    play_games(games, a_players, b_players)
-    a_wins = (games.winners == PLAYERS.X)
-    b_wins = (games.winners == PLAYERS.O)
+    pbar.set_description(f'Average total moves: {games.total_moves:.2f}')
 
-    t2 = time.time()
-    concat_players = Players(concat_params(a_players.params, b_players.params))
-    concat_players.credits = torch.cat([a_players.credits, b_players.credits])
-    concat_players.credits += 1 - concat_players.credits.mean()
     if step % 100 == 0:
-      print(f'mean a_player credits: {a_players.credits.mean():2f} and mean b_player credits: {b_players.credits.mean():.2f}')
-
-    t3 = time.time()
-    concat_players.mate()
-    concat_players.credits += INIT_CREDS - concat_players.credits.mean()
-    mut_rate = concat_players.avg_mutation()
-    trans_mut_rate = concat_players.avg_trans_mutation()
-    a_players, b_players = swizzle_players(concat_players, bs=BATCH_SIZE)
-    t4 = time.time()
-    if step % 100 == 0:
-      games_val = Games(bs=BATCH_SIZE)
-      play_games(games_val, a_players, b_players, test=True)
-      
-      writer.add_scalar('total_moves_val', games_val.total_moves, step)
-      assert ((games.illegal_movers != games.winners) | (games._total_moves == 9)).all()
-      writer.add_scalar('o_illegal_move_rate', (games.illegal_movers == PLAYERS.O).sum()/BATCH_SIZE, step)
-      writer.add_scalar('x_illegal_move_rate', (games.illegal_movers == PLAYERS.X).sum()/BATCH_SIZE, step)
-      writer.add_scalar('o_win_rate', ((games.winners == PLAYERS.O) & (games.illegal_movers != PLAYERS.X)).sum()/BATCH_SIZE, step)
-      writer.add_scalar('x_win_rate', ((games.winners == PLAYERS.X) & (games.illegal_movers != PLAYERS.O)).sum()/BATCH_SIZE, step)
-
-      print(f'Average total moves: {games.total_moves:.2f}')
-      writer.add_scalar('total_moves', games.total_moves, step)
-      writer.add_scalar('avg_log_mutuation', mut_rate, step)
-      writer.add_scalar('avg_trans_log_mutuation', trans_mut_rate, step)
-      writer.add_scalar('draw_rate',(a_wins == b_wins).float().mean(), step)
-      string = f'swizzling took {1000*(t4-t3):.2f}ms, playing took {1000*(t2-t1):.2f}ms, mating took {1000*(t3-t2):.2f}ms'
-      pbar.set_description(string)
-
-    if step % 1000 == 0 and step >0:
-      print('Saving...')
-      pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
-      # Run the validation: check what percentage of moves are as good as the perfect move.
-      val_percentage = validate_model(a_players, perfect_dataset)
-      writer.add_scalar('validation_good_moves_percentage', val_percentage, step)
-      print(f'Validation at step {step}: {val_percentage:.2f}% good moves')
+      write_metrics(step, writer, games, a_players, b_players)
+      if step % 1000 == 0 and step > 0:
+        pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
+        losing_move_ratio = get_losing_move_ratio(a_players)
+        writer.add_scalar('losing_move_ratio', losing_move_ratio, step)
+        print(f'Losing move ratio at step {step}: {losing_move_ratio:.2f} bad move ratio')
   writer.close()
 
 
 if __name__ == '__main__':
-  for i in range(600,2000):
-    bs = 3500
+  for i in range(800,10000):
+    bs = 5000
     name = f'run_{i}'
-    train_run(name=name, embed_n=EMBED_N, bs=bs)
+    train_run(name=name, bs=bs)
