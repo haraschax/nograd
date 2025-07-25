@@ -26,7 +26,7 @@ STRAIGHT_DIM = (BOARD_SIZE*3 + NOISE_SIZE) * BOARD_SIZE
 BIAS_DIM = EMBED_N
 GENE_MUTATION_SIZE = 0
 CORE_SIZE = 1
-GENE_I = 256
+GENE_I = 128
 GENE_J = 4
 GENE_N = GENE_I * GENE_J
 STATE_SIZE = 42
@@ -36,7 +36,7 @@ GENE_SIZE = PROTEIN_N * 3 + 3
 
 DNA_SIZE = GENE_N * GENE_SIZE
 OFFSPRING = 2
-GAMES_PER_MATE = 1
+GAMES_PER_MATE = 3
 
 
 DNA_SIZE = GENE_N * GENE_SIZE
@@ -349,7 +349,7 @@ class Players():
     if current_player == PLAYERS.X:
       state[:,BOARD_SIZE*3:INPUT_DIM] = 1.0
     #state = torch.sign(state)
-    state[:,INPUT_DIM:] = torch.zeros((self.bs, STATE_SIZE - INPUT_DIM), device=boards.device).uniform_(-1, 1)
+    state[:,INPUT_DIM:] = 0.0*torch.zeros((self.bs, STATE_SIZE - INPUT_DIM), device=boards.device).uniform_(-1, 1)
     #state[:,INPUT_DIM:INPUT_DIM+NOISE_SIZE] = torch.rand_like(state[:,INPUT_DIM:INPUT_DIM+NOISE_SIZE]) > 0.5
 
     state = self.run_dna(self.params['dna'], state)
@@ -361,7 +361,7 @@ class Players():
     moves = F.one_hot(sampled_indices.squeeze(-1), num_classes=moves.size(1)).float()
 
     if not test:
-      moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.01).float()
+      moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.1).float()
     '''
     for i, board in enumerate(boards):
       board_np = board.cpu().numpy().reshape((3,3))
@@ -408,22 +408,23 @@ class Players():
     self.params = repro_params
 
     indices = torch.randperm(bs)
-    #gene_indices = torch.randperm(GENE_N)
     trans_mut_rates = self.trans_mutation[:,None].clone()
     for key in self.params:
       if 'trans' in key:
         continue
       if key == 'dna':
+        gene_indices = torch.randperm(GENE_N)
         mix_mutation = (torch.rand_like(self.params[key]) < trans_mut_rates).float().reshape((-1, GENE_N, GENE_SIZE))[:,:,:1]
         mix_mutation *= mutation_mask[:,None,None]
         pre_mixed_params = self.params[key].reshape((-1, GENE_N, GENE_SIZE))
-        self.params[key] = (pre_mixed_params  * (1 - mix_mutation) + pre_mixed_params[indices] * mix_mutation).reshape((-1, GENE_N*GENE_SIZE))
+        self.params[key] = (pre_mixed_params  * (1 - mix_mutation) + pre_mixed_params[indices][:,gene_indices] * mix_mutation).reshape((-1, GENE_N*GENE_SIZE))
       else:
+        mut_indices = torch.randperm(MUTATION_PARAMS_SIZE)
         mix_mutation = (torch.rand_like(self.params[key]) < trans_mut_rates).float()
         mix_mutation *= mutation_mask[:,None]
         pre_mixed_params = self.params[key]
-        self.params[key] = (pre_mixed_params  * (1 - mix_mutation) + pre_mixed_params[indices] * mix_mutation)
-      
+        self.params[key] = (pre_mixed_params  * (1 - mix_mutation) + pre_mixed_params[indices][:,mut_indices] * mix_mutation)
+
 
     for key in self.params:
       if 'mutation' in key:
@@ -540,7 +541,7 @@ def train_run(name='', bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(99,100000):
+  for i in range(60,100000):
     bs = 5000
     name = f'run_{i}'
     train_run(name=name, bs=bs)
