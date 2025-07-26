@@ -330,7 +330,6 @@ class Players():
   def output_scale_mutation(self):
     scales_exp = torch.tanh(self.params['output_scale_mutation'].sum(dim=1)/20)
     scales = 10**(5*scales_exp)
-    scales[:] = 1e5
     return scales
 
 
@@ -541,7 +540,7 @@ def train_run(name='', bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(60,100000):
+  for i in range(80,100000):
     bs = 5000
     name = f'run_{i}'
     train_run(name=name, bs=bs)
