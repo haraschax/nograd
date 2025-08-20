@@ -594,7 +594,7 @@ def train_run(name='', bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(600,100000):
+  for i in range(0,100000):
     bs = 5000
     name = f'run_{i}'
     train_run(name=name, bs=bs)
