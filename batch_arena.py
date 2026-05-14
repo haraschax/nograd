@@ -37,8 +37,11 @@ LAYERS = 3
 DNA_SIZE = GENE_N * GENE_SIZE
 OFFSPRING = 2
 GAMES_PER_MATE = 10
+RANDOM_OPENING_PAIRS = 2
+BOARD_FITNESS_BATCH_SIZE = 512
 
-DEVICE = 'cuda'
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+TRAINING_BOARD_CACHE = None
 
 
 def is_winner(board, player):
@@ -154,6 +157,75 @@ def get_losing_move_ratio(player_instance):
     total += 1
   return losing_moves / total
 
+def get_training_board_cache(perfect_dataset):
+  global TRAINING_BOARD_CACHE
+  if TRAINING_BOARD_CACHE is not None:
+    return TRAINING_BOARD_CACHE
+
+  boards = []
+  players = []
+  scores = []
+  for board in get_all_valid_boards():
+    if is_winner(board, PLAYERS.X) or is_winner(board, PLAYERS.O) or is_draw(board):
+      continue
+    board_hash = unique_int_from_board(board)
+    boards.append(board.flatten().copy())
+    players.append(perfect_dataset['players'][board_hash])
+    scores.append(perfect_dataset['scores'][board_hash])
+
+  TRAINING_BOARD_CACHE = (
+    np.asarray(boards, dtype=np.int8),
+    np.asarray(players, dtype=np.int8),
+    np.asarray(scores, dtype=np.int8),
+  )
+  return TRAINING_BOARD_CACHE
+
+def score_after_move(board, current_player, move_index, perfect_scores):
+  row, col = move_index // 3, move_index % 3
+  board_after = board.reshape((3, 3)).copy()
+  if board_after[row, col] != PLAYERS.NONE:
+    return -1
+  board_after[row, col] = current_player
+  if is_winner(board_after, current_player):
+    return 1
+  if is_draw(board_after):
+    return 0
+  return -perfect_scores[unique_int_from_board(board_after)]
+
+def add_board_fitness(players, sample_size=BOARD_FITNESS_BATCH_SIZE):
+  perfect_dataset = players.perfect_dataset
+  boards_np, current_players_np, scores_before_np = get_training_board_cache(perfect_dataset)
+  selected_n = min(players.bs, sample_size)
+  selected_players = torch.randperm(players.bs, device=players.device)[:selected_n]
+  selected_boards = np.random.randint(0, len(boards_np), size=selected_n)
+
+  board_batch_np = boards_np[selected_boards]
+  current_batch_np = current_players_np[selected_boards]
+  scores_before = scores_before_np[selected_boards]
+  move_indices = np.zeros((selected_n,), dtype=np.int64)
+
+  for current_player in [PLAYERS.X, PLAYERS.O]:
+    mask_np = current_batch_np == current_player
+    if not np.any(mask_np):
+      continue
+    player_indices = selected_players[torch.tensor(mask_np, dtype=torch.bool, device=players.device)]
+    board_tensor = torch.tensor(board_batch_np[mask_np], dtype=torch.int64, device=players.device)
+    sampled_players = Players(splice_params(players.params, player_indices))
+    moves = sampled_players.play(board_tensor, test=True, current_player=current_player)
+    move_indices[mask_np] = torch.argmax(moves, dim=1).detach().cpu().numpy()
+
+  perfect_scores = perfect_dataset['scores']
+  deltas = []
+  for board, current_player, before, move_index in zip(board_batch_np, current_batch_np, scores_before, move_indices):
+    after = score_after_move(board, current_player, int(move_index), perfect_scores)
+    deltas.append(after - before)
+  deltas = np.asarray(deltas)
+
+  credits = torch.zeros((selected_n,), dtype=players.params['credits'].dtype, device=players.device)
+  credits[deltas >= 0] = 1
+  credits[deltas < 0] = -2
+  players.params['credits'][selected_players] += credits
+
 
 def check_winner(board, conv_layer):
     board_tensor = board.float().unsqueeze(1)
@@ -161,16 +233,37 @@ def check_winner(board, conv_layer):
     return conv_output
 
 class Games():
-  def __init__(self, bs=BATCH_SIZE, device=DEVICE, perfect_dataset=None):
+  def __init__(self, bs=BATCH_SIZE, device=DEVICE, perfect_dataset=None, random_openings=False):
     self.bs = bs
     self.device = device
     self.boards = torch.zeros((self.bs, BOARD_SIZE), dtype=torch.int8, device=self.device)
     self.winners = torch.zeros((self.bs,), dtype=torch.int8, device=self.device)
     self.illegal_movers = torch.zeros((self.bs,), dtype=torch.int8, device=self.device)
+    if random_openings:
+      self.add_random_openings()
     self.update_game_over()
     self.perfect_dataset = perfect_dataset
     if perfect_dataset is not None:
       self.perfect_scores = torch.tensor(self.perfect_dataset['scores'], device=self.device)
+
+  def add_random_openings(self, max_pairs=RANDOM_OPENING_PAIRS):
+    opening_pairs = torch.randint(0, max_pairs + 1, (self.bs,), device=self.device)
+    opening_lengths = opening_pairs * 2
+    current_player = PLAYERS.X
+    for ply in range(max_pairs * 2):
+      active = opening_lengths > ply
+      if not torch.any(active):
+        break
+
+      legal_moves = self.boards == PLAYERS.NONE
+      random_scores = torch.rand((self.bs, BOARD_SIZE), device=self.device)
+      random_scores[~legal_moves] = -1
+      move_idxs = torch.argmax(random_scores, dim=1, keepdim=True)
+
+      move_scattered = torch.zeros_like(self.boards.to(dtype=torch.bool))
+      move_scattered.scatter_(1, move_idxs, 1)
+      self.boards = self.boards + active[:, None] * move_scattered * current_player
+      current_player = next_player(current_player)
 
   def update(self, moves, player, test=False, player_dict=None):
     assert len(moves) == self.bs
@@ -311,7 +404,7 @@ class Players():
 
     if not test:
       moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.01).float()
-    return moves
+    return moves.masked_fill(boards != PLAYERS.NONE, -1e9)
 
   def mate(self,):
     cred = self.params['credits']
@@ -376,8 +469,9 @@ def play_games(games, x_players, o_players, test=False):
     current_player = next_player(current_player)
   if not test:
     for player in player_dict:
-      player_dict[player].params['credits'][(games.winners == player)] += 1
-      player_dict[player].params['credits'][games.losers == player] -= 1
+      player_dict[player].params['credits'][(games.winners == player)] += 2
+      player_dict[player].params['credits'][games.losers == player] -= 2
+      player_dict[player].params['credits'][games.winners == PLAYERS.NONE] += 1
 
 def splice_params(params, indices):
   new_params = {}
@@ -444,9 +538,10 @@ def train_run(name='', bs=BATCH_SIZE):
   for step in pbar:
     for _ in range(GAMES_PER_MATE):
       a_players, b_players = swizzle_players(players)
-      games = Games(bs=bs)
+      games = Games(bs=bs, random_openings=True)
       play_games(games, a_players, b_players)
       players = concat_players(a_players, b_players)
+    add_board_fitness(players)
     players.mate()
 
     pbar.set_description(f'Average total moves: {games.total_moves:.2f}')

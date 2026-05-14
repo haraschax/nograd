@@ -28,5 +28,5 @@ To play against a perfect player that was trained classically:
 
 
 ## Hacks still to fix
-- 20% of the population is hardcoded to be a perfect player, without that convergence is not reliable
+- Training no longer needs hardcoded perfect players in the population. It now broadens self-play with randomized legal openings and a rules-derived board-state fitness check, so candidates are selected for preserving or improving positions rather than for copying a perfect player.
 - The architecture is handcoded and arbitrary, that should ideally also be learned
