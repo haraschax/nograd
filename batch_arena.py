@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import pickle
 import os
+import argparse
 import torch
 import math
 import random
@@ -38,7 +39,7 @@ DNA_SIZE = GENE_N * GENE_SIZE
 OFFSPRING = 2
 GAMES_PER_MATE = 10
 
-DEVICE = 'cuda'
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 def is_winner(board, player):
@@ -120,10 +121,12 @@ def generate_perfect_moves():
 
 def get_losing_move_ratio(player_instance):
   if os.path.isfile('perfect_moves.pkl'):
-    perfect_dataset = pickle.load(open('perfect_moves.pkl', 'rb'))
+    with open('perfect_moves.pkl', 'rb') as f:
+      perfect_dataset = pickle.load(f)
   else:
     perfect_dataset = generate_perfect_moves()
-    pickle.dump(perfect_dataset, open('perfect_moves.pkl', 'wb'))
+    with open('perfect_moves.pkl', 'wb') as f:
+      pickle.dump(perfect_dataset, f)
   test_player = Players(splice_params(player_instance.params, [0]))
   losing_moves = 0
   total = 0
@@ -242,7 +245,8 @@ class Players():
     self.weights = None
 
     if os.path.isfile('perfect_moves.pkl'):
-      self.perfect_dataset = pickle.load(open('perfect_moves.pkl', 'rb'))
+      with open('perfect_moves.pkl', 'rb') as f:
+        self.perfect_dataset = pickle.load(f)
     else:
       self.perfect_dataset = generate_perfect_moves()
 
@@ -316,6 +320,7 @@ class Players():
   def mate(self,):
     cred = self.params['credits']
     bs = len(cred)
+    assert all(len(v) == bs for v in self.params.values()), "population parameter tensors must stay aligned"
     can_mate = torch.argsort(cred, descending=True)
     print(torch.max(cred), torch.min(cred), len(can_mate), torch.mean(abs(cred).float()))
     print(self.params['credits'][can_mate][:10], self.params['x_games'][can_mate][:10])
@@ -330,8 +335,8 @@ class Players():
       if key in ['credits', 'x_games']:
         continue
       repro_params[key] = self.params[key][can_mate,None,:].repeat(1, OFFSPRING, 1).reshape((bs, self.params[key].shape[1]))
-    repro_params['credits'] = torch.zeros((bs*2), dtype=torch.long, device=DEVICE)
-    repro_params['x_games'] = torch.zeros((bs*2), dtype=torch.long, device=DEVICE)
+    repro_params['credits'] = torch.zeros((bs), dtype=torch.long, device=self.device)
+    repro_params['x_games'] = torch.zeros((bs), dtype=torch.long, device=self.device)
     
 
     self.params = repro_params
@@ -434,12 +439,12 @@ def init_players(bs=BATCH_SIZE):
   players = Players(params)
   return players
 
-def train_run(name='', bs=BATCH_SIZE):
+def train_run(name='', bs=BATCH_SIZE, steps=200000, checkpoint_every=1000):
 
   writer = SummaryWriter(f'runs/{name}')
   players = init_players(bs=bs)
 
-  pbar = tqdm.tqdm(range(200000))
+  pbar = tqdm.tqdm(range(steps))
 
   for step in pbar:
     for _ in range(GAMES_PER_MATE):
@@ -453,7 +458,7 @@ def train_run(name='', bs=BATCH_SIZE):
 
     if step % 100 == 0:
       write_metrics(step, writer, games, a_players, b_players)
-      if step % 1000 == 0 and step > 0:
+      if checkpoint_every and step % checkpoint_every == 0 and step > 0:
         pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
         losing_move_ratio = get_losing_move_ratio(a_players)
         writer.add_scalar('losing_move_ratio', losing_move_ratio, step)
@@ -462,7 +467,19 @@ def train_run(name='', bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(120,2000):
-    bs = 4000
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--device', default=DEVICE, choices=['cpu', 'cuda'])
+  parser.add_argument('--batch-size', type=int, default=4000)
+  parser.add_argument('--steps', type=int, default=200000)
+  parser.add_argument('--runs', type=int, default=1)
+  parser.add_argument('--start-run', type=int, default=0)
+  parser.add_argument('--checkpoint-every', type=int, default=1000)
+  args = parser.parse_args()
+
+  if args.device == 'cuda' and not torch.cuda.is_available():
+    raise RuntimeError('CUDA requested but unavailable')
+  DEVICE = args.device
+
+  for i in range(args.start_run, args.start_run + args.runs):
     name = f'run_{i}'
-    train_run(name=name, bs=bs)
+    train_run(name=name, bs=args.batch_size, steps=args.steps, checkpoint_every=args.checkpoint_every)
