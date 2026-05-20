@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import argparse
 import pickle
 import os
 import torch
@@ -38,7 +39,12 @@ DNA_SIZE = GENE_N * GENE_SIZE
 OFFSPRING = 2
 GAMES_PER_MATE = 10
 
-DEVICE = 'cuda'
+DEVICE = os.environ.get('NOGRAD_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu')
+LEGAL_MOVE_MASK = -1e9
+EXPLORATION_RATE = 0.01
+WIN_CREDIT = 2
+LOSS_CREDIT = 2
+DRAW_CREDIT = 1
 
 
 def is_winner(board, player):
@@ -309,13 +315,17 @@ class Players():
     #sampled_indices = torch.multinomial(move_probs, num_samples=1)
     #moves = F.one_hot(sampled_indices.squeeze(-1), num_classes=moves.size(1)).float()
 
+    legal_moves = boards == PLAYERS.NONE
     if not test:
-      moves[boards == PLAYERS.NONE] += 1e8 * torch.ones_like(moves[boards == PLAYERS.NONE]) * (torch.rand_like(moves[boards == PLAYERS.NONE]) < 0.01).float()
+      explore = (torch.rand_like(moves) < EXPLORATION_RATE) & legal_moves
+      moves = moves + 1e8 * explore.float()
+    moves = moves.masked_fill(~legal_moves, LEGAL_MOVE_MASK)
     return moves
 
   def mate(self,):
     cred = self.params['credits']
     bs = len(cred)
+    assert all(len(value) == bs for value in self.params.values()), "population parameter tensors must stay aligned"
     can_mate = torch.argsort(cred, descending=True)
     print(torch.max(cred), torch.min(cred), len(can_mate), torch.mean(abs(cred).float()))
     print(self.params['credits'][can_mate][:10], self.params['x_games'][can_mate][:10])
@@ -330,8 +340,8 @@ class Players():
       if key in ['credits', 'x_games']:
         continue
       repro_params[key] = self.params[key][can_mate,None,:].repeat(1, OFFSPRING, 1).reshape((bs, self.params[key].shape[1]))
-    repro_params['credits'] = torch.zeros((bs*2), dtype=torch.long, device=DEVICE)
-    repro_params['x_games'] = torch.zeros((bs*2), dtype=torch.long, device=DEVICE)
+    repro_params['credits'] = torch.zeros((bs), dtype=torch.long, device=self.device)
+    repro_params['x_games'] = torch.zeros((bs), dtype=torch.long, device=self.device)
     
 
     self.params = repro_params
@@ -376,8 +386,9 @@ def play_games(games, x_players, o_players, test=False):
     current_player = next_player(current_player)
   if not test:
     for player in player_dict:
-      player_dict[player].params['credits'][(games.winners == player)] += 1
-      player_dict[player].params['credits'][games.losers == player] -= 1
+      player_dict[player].params['credits'][(games.winners == player)] += WIN_CREDIT
+      player_dict[player].params['credits'][games.losers == player] -= LOSS_CREDIT
+      player_dict[player].params['credits'][(games.winners == PLAYERS.NONE)] += DRAW_CREDIT
 
 def splice_params(params, indices):
   new_params = {}
@@ -434,12 +445,12 @@ def init_players(bs=BATCH_SIZE):
   players = Players(params)
   return players
 
-def train_run(name='', bs=BATCH_SIZE):
+def train_run(name='', bs=BATCH_SIZE, steps=200000, checkpoint_every=1000):
 
   writer = SummaryWriter(f'runs/{name}')
   players = init_players(bs=bs)
 
-  pbar = tqdm.tqdm(range(200000))
+  pbar = tqdm.tqdm(range(steps))
 
   for step in pbar:
     for _ in range(GAMES_PER_MATE):
@@ -453,7 +464,7 @@ def train_run(name='', bs=BATCH_SIZE):
 
     if step % 100 == 0:
       write_metrics(step, writer, games, a_players, b_players)
-      if step % 1000 == 0 and step > 0:
+      if checkpoint_every and step % checkpoint_every == 0 and step > 0:
         pickle.dump(a_players.params, open('organic_dna.pkl', 'wb'))
         losing_move_ratio = get_losing_move_ratio(a_players)
         writer.add_scalar('losing_move_ratio', losing_move_ratio, step)
@@ -462,7 +473,20 @@ def train_run(name='', bs=BATCH_SIZE):
 
 
 if __name__ == '__main__':
-  for i in range(120,2000):
-    bs = 4000
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--device', default=DEVICE, choices=['cpu', 'cuda'])
+  parser.add_argument('--batch-size', type=int, default=4000)
+  parser.add_argument('--steps', type=int, default=200000)
+  parser.add_argument('--runs', type=int, default=1880)
+  parser.add_argument('--start-run', type=int, default=120)
+  parser.add_argument('--checkpoint-every', type=int, default=1000)
+  args = parser.parse_args()
+
+  if args.device == 'cuda' and not torch.cuda.is_available():
+    raise RuntimeError('CUDA requested but unavailable')
+  DEVICE = args.device
+
+  for i in range(args.start_run, args.start_run + args.runs):
+    bs = args.batch_size
     name = f'run_{i}'
-    train_run(name=name, bs=bs)
+    train_run(name=name, bs=bs, steps=args.steps, checkpoint_every=args.checkpoint_every)

@@ -27,6 +27,10 @@ To play against a perfect player that was trained classically:
 ```
 
 
+## Training notes
+- Training uses self-play only; there is no hardcoded perfect-player population bootstrap.
+- Move selection masks occupied board cells so evolution is not spent rediscovering illegal moves.
+- Drawn games receive a smaller credit than wins, which rewards non-losing play without making draws better than wins.
+
 ## Hacks still to fix
-- 20% of the population is hardcoded to be a perfect player, without that convergence is not reliable
 - The architecture is handcoded and arbitrary, that should ideally also be learned
