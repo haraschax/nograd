@@ -35,7 +35,7 @@ GENE_SIZE = BOOLS_SIZE + GENE_MUTATION_SIZE + 5
 LAYERS = 3
 
 DNA_SIZE = GENE_N * GENE_SIZE
-OFFSPRING = 2
+OFFSPRING = 4
 GAMES_PER_MATE = 10
 
 DEVICE = 'cuda'
@@ -378,6 +378,8 @@ def play_games(games, x_players, o_players, test=False):
     for player in player_dict:
       player_dict[player].params['credits'][(games.winners == player)] += 1
       player_dict[player].params['credits'][games.losers == player] -= 1
+      # ponytail: draw bonus — draws are optimal in tic-tac-toe, gives signal for convergence
+      player_dict[player].params['credits'][games.winners == PLAYERS.NONE] += 1
 
 def splice_params(params, indices):
   new_params = {}
